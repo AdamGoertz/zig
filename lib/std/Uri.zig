@@ -99,6 +99,21 @@ pub const ParseError = error{ UnexpectedCharacter, InvalidFormat, InvalidPort };
 /// original `text`. Each component that is provided, will be non-`null`.
 pub fn parse(text: []const u8) ParseError!Uri {
     var reader = SliceReader{ .slice = text };
+
+    // Interpret URIs with leading '.'s as relative paths.
+    if (reader.peekPrefix(".")) {
+        return Uri{
+            .scheme = "file",
+            .user = null,
+            .password = null,
+            .host = null,
+            .port = null,
+            .path = text,
+            .query = null,
+            .fragment = null,
+        };
+    }
+
     var uri = Uri{
         .scheme = reader.readWhile(isSchemeChar),
         .user = null,
@@ -118,13 +133,13 @@ pub fn parse(text: []const u8) ParseError!Uri {
         return error.InvalidFormat;
     }
 
-    if (reader.peekPrefix("//")) { // authority part
+    if (reader.peekPrefix("//")) a: { // authority part
         std.debug.assert(reader.get().? == '/');
         std.debug.assert(reader.get().? == '/');
 
         const authority = reader.readUntil(isAuthoritySeparator);
         if (authority.len == 0)
-            return error.InvalidFormat;
+            break :a ;
 
         var start_of_host: usize = 0;
         if (std.mem.indexOf(u8, authority, "@")) |index| {

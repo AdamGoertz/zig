@@ -333,6 +333,35 @@ const Report = struct {
     }
 };
 
+const PackageSourceType = enum {
+    file,
+    http_request,
+};
+
+const PackageSource = union(PackageSourceType) {
+    file: fs.File,
+    http_request: std.http.Client.Request,
+
+    pub fn deinit(ps: *PackageSource) void {
+        switch (ps.*) {
+            .file => |*file| file.close(),
+            .http_request => |*req| req.deinit(),
+        }
+    }
+};
+
+pub fn getPackageSourceType(uri: std.Uri) error{UnknownProtocol}!PackageSourceType {
+    const package_source_map = std.ComptimeStringMap(
+        PackageSourceType,
+        .{
+            .{ "file", .file },
+            .{ "http", .http_request },
+            .{ "https", .http_request },
+        },
+    );
+    return package_source_map.get(uri.scheme) orelse error.UnknownProtocol;
+}
+
 fn fetchAndUnpack(
     thread_pool: *ThreadPool,
     http_client: *std.http.Client,
@@ -387,6 +416,7 @@ fn fetchAndUnpack(
     }
 
     const uri = try std.Uri.parse(dep.url);
+    std.log.info("URI: {s}", .{uri.path});
 
     const rand_int = std.crypto.random.int(u64);
     const tmp_dir_sub_path = "tmp" ++ s ++ Manifest.hex64(rand_int);
@@ -394,6 +424,7 @@ fn fetchAndUnpack(
     const actual_hash = a: {
         var tmp_directory: Compilation.Directory = d: {
             const path = try global_cache_directory.join(gpa, &.{tmp_dir_sub_path});
+            std.log.info("tmp cache directory: {s}", .{path});
             errdefer gpa.free(path);
 
             const iterable_dir = try global_cache_directory.handle.makeOpenPathIterable(tmp_dir_sub_path, .{});
@@ -406,21 +437,62 @@ fn fetchAndUnpack(
         };
         defer tmp_directory.closeAndFree(gpa);
 
-        var req = try http_client.request(uri, .{}, .{});
-        defer req.deinit();
+        const source_type = try getPackageSourceType(uri);
+        std.log.info("source type: {s}", .{ @tagName(source_type)});
 
-        if (mem.endsWith(u8, uri.path, ".tar.gz")) {
-            // I observed the gzip stream to read 1 byte at a time, so I am using a
-            // buffered reader on the front of it.
-            try unpackTarball(gpa, &req, tmp_directory.handle, std.compress.gzip);
-        } else if (mem.endsWith(u8, uri.path, ".tar.xz")) {
-            // I have not checked what buffer sizes the xz decompression implementation uses
-            // by default, so the same logic applies for buffering the reader as for gzip.
-            try unpackTarball(gpa, &req, tmp_directory.handle, std.compress.xz);
-        } else {
-            return report.fail(dep.url_tok, "unknown file extension for path '{s}'", .{
-                uri.path,
-            });
+        const cwd = try std.process.getCwdAlloc(gpa);
+        defer gpa.free(cwd);
+        std.log.info("cwd {s}", .{cwd});
+
+        var package_source = switch (source_type) {
+            .file => PackageSource{
+                // TODO: get path to build.zig
+                .file = try fs.cwd().openFile(uri.path, .{}),
+            },
+            .http_request => PackageSource{
+                .http_request = try http_client.request(uri, .{}, .{}),
+            },
+        };
+        defer package_source.deinit();
+
+        switch (package_source) {
+            inline else => |*ps| {
+                if (mem.endsWith(u8, uri.path, ".tar.gz")) {
+                    // I observed the gzip stream to read 1 byte at a time, so I am using a
+                    // buffered reader on the front of it.
+                    try unpackTarball(gpa, ps.reader(), tmp_directory.handle, std.compress.gzip);
+                } else if (mem.endsWith(u8, uri.path, ".tar.xz")) {
+                    // I have not checked what buffer sizes the xz decompression implementation uses
+                    // by default, so the same logic applies for buffering the reader as for gzip.
+                    try unpackTarball(gpa, ps.reader(), tmp_directory.handle, std.compress.xz);
+                } else if (mem.endsWith(u8, uri.path, "/")) {
+                    if (@TypeOf(ps.*) == fs.File) {
+                        std.log.info("is file: {s}", .{uri.path});
+
+                        const metadata = try ps.metadata();
+
+                        if (metadata.kind() == .Directory) {
+                            std.log.info("is directory: {s}", .{uri.path});
+
+                            var dir = try fs.cwd().openDir(uri.path, .{});
+                            defer dir.close();
+                            try dir.copyTree(gpa, tmp_directory.handle);
+                        } else {
+                            return report.fail(dep.url_tok, "unable to unpack non-directory '{s}' as directory", .{
+                                uri.path,
+                            });
+                        }
+                    } else {
+                        return report.fail(dep.url_tok, "unable to fetch directory '{s}'' over http", .{
+                            uri.path,
+                        });
+                    }
+                } else {
+                    return report.fail(dep.url_tok, "unknown file extension for URI '{s}'", .{
+                        uri.path,
+                    });
+                }
+            },
         }
 
         // TODO: delete files not included in the package prior to computing the package hash.
@@ -460,11 +532,11 @@ fn fetchAndUnpack(
 
 fn unpackTarball(
     gpa: Allocator,
-    req: *std.http.Client.Request,
+    reader: anytype,
     out_dir: fs.Dir,
     comptime compression: type,
 ) !void {
-    var br = std.io.bufferedReaderSize(std.crypto.tls.max_ciphertext_record_len, req.reader());
+    var br = std.io.bufferedReaderSize(std.crypto.tls.max_ciphertext_record_len, reader);
 
     var decompress = try compression.decompress(gpa, br.reader());
     defer decompress.deinit();
