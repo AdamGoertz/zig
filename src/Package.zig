@@ -213,9 +213,16 @@ pub fn fetchAndAddDependencies(
         const sub_prefix = try std.fmt.allocPrint(arena, "{s}{s}.", .{ name_prefix, name });
         const fqn = sub_prefix[0 .. sub_prefix.len - 1];
 
-        const sub_pkg = try fetchAndUnpack(
+        const sub_pkg = try getCachedPackage(
+            http_client.allocator,
+            global_cache_directory,
+            dep,
+            build_roots_source,
+            fqn,
+        ) orelse try fetchAndUnpack(
             thread_pool,
             http_client,
+            directory,
             global_cache_directory,
             dep,
             report,
@@ -333,47 +340,192 @@ const Report = struct {
     }
 };
 
-const PackageSourceType = enum {
-    file,
-    http_request,
-};
+const PackageSource = struct {
+    uri: std.Uri,
+    /// Directory to which relative paths in URI are relative.
+    root_dir: Compilation.Directory,
+    resource: Resource,
+    file_type: FileType,
 
-const PackageSource = union(PackageSourceType) {
-    file: fs.File,
-    http_request: std.http.Client.Request,
+    const SourceType = enum {
+        file,
+        http_request,
+    };
+
+    const FileType = enum {
+        @"tar.gz",
+        @"tar.xz",
+        directory,
+    };
+
+    const Resource = union(SourceType) {
+        file: fs.File,
+        http_request: std.http.Client.Request,
+    };
+
+    pub const PackageLocation = struct {
+        hash: [Manifest.Hash.digest_length]u8,
+        dir_path: []const u8,
+
+        pub fn deinit(pl: *PackageLocation, allocator: Allocator) void {
+            allocator.free(pl.dir_path);
+            pl.* = undefined;
+        }
+    };
+
+    pub fn init(uri: std.Uri, directory: Compilation.Directory, http_client: *std.http.Client) !PackageSource {
+        const source_type = try getPackageSourceType(uri);
+
+        return .{
+            .uri = uri,
+            .root_dir = directory,
+            .resource = switch (source_type) {
+                .file => Resource{
+                    .file = try directory.handle.openFile(uri.path, .{}),
+                },
+                .http_request => Resource{
+                    .http_request = try http_client.request(uri, .{}, .{}),
+                },
+            },
+            .file_type = try getFileType(uri),
+        };
+    }
 
     pub fn deinit(ps: *PackageSource) void {
-        switch (ps.*) {
+        switch (ps.resource) {
             .file => |*file| file.close(),
             .http_request => |*req| req.deinit(),
         }
     }
+
+    pub fn unpack(ps: *PackageSource, allocator: Allocator, thread_pool: *ThreadPool, global_cache_directory: Compilation.Directory) !PackageLocation {
+        if (!ps.needsUnpacking()) {
+            const package_path = try ps.getUnpackedPackagePath(allocator, global_cache_directory, null);
+            var package_dir = try fs.openIterableDirAbsolute(package_path, .{});
+            defer package_dir.close();
+            const actual_hash = try computePackageHash(thread_pool, .{ .dir = package_dir.dir });
+            return .{
+                .hash = actual_hash,
+                .dir_path = package_path,
+            };
+        }
+
+        const s = fs.path.sep_str;
+        const rand_int = std.crypto.random.int(u64);
+        const tmp_dir_sub_path = "tmp" ++ s ++ Manifest.hex64(rand_int);
+
+        var tmp_directory: Compilation.Directory = d: {
+            const path = try global_cache_directory.join(allocator, &.{tmp_dir_sub_path});
+            errdefer allocator.free(path);
+
+            const iterable_dir = try global_cache_directory.handle.makeOpenPathIterable(tmp_dir_sub_path, .{});
+            errdefer iterable_dir.close();
+
+            break :d .{
+                .path = path,
+                .handle = iterable_dir.dir,
+            };
+        };
+        defer tmp_directory.closeAndFree(allocator);
+
+        switch (ps.file_type) {
+            .@"tar.gz" => {
+                // I observed the gzip stream to read 1 byte at a time, so I am using a
+                // buffered reader on the front of it.
+                switch (ps.resource) {
+                    inline else => |*r| try unpackTarball(allocator, r.reader(), tmp_directory.handle, std.compress.gzip),
+                }
+            },
+            .@"tar.xz" => {
+                // I have not checked what buffer sizes the xz decompression implementation uses
+                // by default, so the same logic applies for buffering the reader as for gzip.
+                switch (ps.resource) {
+                    inline else => |*r| try unpackTarball(allocator, r.reader(), tmp_directory.handle, std.compress.xz),
+                }
+            },
+            .directory => unreachable,
+        }
+
+        // TODO: delete files not included in the package prior to computing the package hash.
+        // for example, if the ini file has directives to include/not include certain files,
+        // apply those rules directly to the filesystem right here. This ensures that files
+        // not protected by the hash are not present on the file system.
+
+        const actual_hash = try computePackageHash(thread_pool, .{ .dir = tmp_directory.handle });
+
+        const unpacked_path = try ps.getUnpackedPackagePath(allocator, global_cache_directory, actual_hash);
+
+        const relative_unpacked_path = try fs.path.relative(allocator, global_cache_directory.path.?, unpacked_path);
+        defer allocator.free(relative_unpacked_path);
+        try renameTmpIntoCache(global_cache_directory.handle, tmp_dir_sub_path, relative_unpacked_path);
+
+        return .{
+            .hash = actual_hash,
+            .dir_path = unpacked_path,
+        };
+    }
+
+    /// Get the path to the unpacked package.
+    /// The returned path is owned by the caller and must be freed using the provided allocator.
+    pub fn getUnpackedPackagePath(
+        ps: PackageSource,
+        allocator: Allocator,
+        global_cache_dir: Compilation.Directory,
+        hash_digest: ?[Manifest.Hash.digest_length]u8,
+    ) ![]const u8 {
+        if (ps.needsUnpacking()) {
+            assert(hash_digest != null);
+
+            const s = fs.path.sep_str;
+            const pkg_dir_sub_path = "p" ++ s ++ Manifest.hexDigest(hash_digest.?);
+
+            return try global_cache_dir.join(allocator, &.{pkg_dir_sub_path});
+        }
+
+        // Resolve path to package relative to root_dir
+        return try fs.path.resolve(allocator, &.{ ps.root_dir.path.?, ps.uri.path });
+    }
+
+    fn needsUnpacking(ps: PackageSource) bool {
+        return switch (ps.file_type) {
+            .directory => false,
+            .@"tar.gz", .@"tar.xz" => true,
+        };
+    }
+
+    fn getPackageSourceType(uri: std.Uri) error{UnknownProtocol}!SourceType {
+        const package_source_map = std.ComptimeStringMap(
+            SourceType,
+            .{
+                .{ "file", .file },
+                .{ "http", .http_request },
+                .{ "https", .http_request },
+            },
+        );
+        return package_source_map.get(uri.scheme) orelse error.UnknownProtocol;
+    }
+
+    fn getFileType(uri: std.Uri) error{UnknownFileType}!FileType {
+        return if (mem.endsWith(u8, uri.path, ".tar.gz"))
+            .@"tar.gz"
+        else if (mem.endsWith(u8, uri.path, ".tar.xz"))
+            .@"tar.xz"
+        else if (mem.endsWith(u8, uri.path, "/"))
+            .directory
+            // Other types here
+        else
+            error.UnknownFileType;
+    }
 };
 
-pub fn getPackageSourceType(uri: std.Uri) error{UnknownProtocol}!PackageSourceType {
-    const package_source_map = std.ComptimeStringMap(
-        PackageSourceType,
-        .{
-            .{ "file", .file },
-            .{ "http", .http_request },
-            .{ "https", .http_request },
-        },
-    );
-    return package_source_map.get(uri.scheme) orelse error.UnknownProtocol;
-}
-
-fn fetchAndUnpack(
-    thread_pool: *ThreadPool,
-    http_client: *std.http.Client,
+fn getCachedPackage(
+    gpa: Allocator,
     global_cache_directory: Compilation.Directory,
     dep: Manifest.Dependency,
-    report: Report,
     build_roots_source: *std.ArrayList(u8),
     fqn: []const u8,
-) !*Package {
-    const gpa = http_client.allocator;
+) !?*Package {
     const s = fs.path.sep_str;
-
     // Check if the expected_hash is already present in the global package
     // cache, and thereby avoid both fetching and unpacking.
     if (dep.hash) |h| cached: {
@@ -415,98 +567,31 @@ fn fetchAndUnpack(
         return ptr;
     }
 
+    return null;
+}
+
+fn fetchAndUnpack(
+    thread_pool: *ThreadPool,
+    http_client: *std.http.Client,
+    directory: Compilation.Directory,
+    global_cache_directory: Compilation.Directory,
+    dep: Manifest.Dependency,
+    report: Report,
+    build_roots_source: *std.ArrayList(u8),
+    fqn: []const u8,
+) !*Package {
+    const gpa = http_client.allocator;
+
     const uri = try std.Uri.parse(dep.url);
-    std.log.info("URI: {s}", .{uri.path});
 
-    const rand_int = std.crypto.random.int(u64);
-    const tmp_dir_sub_path = "tmp" ++ s ++ Manifest.hex64(rand_int);
+    // If so, fetch it
+    var package_source = try PackageSource.init(uri, directory, http_client);
+    defer package_source.deinit();
 
-    const actual_hash = a: {
-        var tmp_directory: Compilation.Directory = d: {
-            const path = try global_cache_directory.join(gpa, &.{tmp_dir_sub_path});
-            std.log.info("tmp cache directory: {s}", .{path});
-            errdefer gpa.free(path);
+    var package_location = try package_source.unpack(gpa, thread_pool, global_cache_directory);
+    defer package_location.deinit(gpa);
 
-            const iterable_dir = try global_cache_directory.handle.makeOpenPathIterable(tmp_dir_sub_path, .{});
-            errdefer iterable_dir.close();
-
-            break :d .{
-                .path = path,
-                .handle = iterable_dir.dir,
-            };
-        };
-        defer tmp_directory.closeAndFree(gpa);
-
-        const source_type = try getPackageSourceType(uri);
-        std.log.info("source type: {s}", .{ @tagName(source_type)});
-
-        const cwd = try std.process.getCwdAlloc(gpa);
-        defer gpa.free(cwd);
-        std.log.info("cwd {s}", .{cwd});
-
-        var package_source = switch (source_type) {
-            .file => PackageSource{
-                // TODO: get path to build.zig
-                .file = try fs.cwd().openFile(uri.path, .{}),
-            },
-            .http_request => PackageSource{
-                .http_request = try http_client.request(uri, .{}, .{}),
-            },
-        };
-        defer package_source.deinit();
-
-        switch (package_source) {
-            inline else => |*ps| {
-                if (mem.endsWith(u8, uri.path, ".tar.gz")) {
-                    // I observed the gzip stream to read 1 byte at a time, so I am using a
-                    // buffered reader on the front of it.
-                    try unpackTarball(gpa, ps.reader(), tmp_directory.handle, std.compress.gzip);
-                } else if (mem.endsWith(u8, uri.path, ".tar.xz")) {
-                    // I have not checked what buffer sizes the xz decompression implementation uses
-                    // by default, so the same logic applies for buffering the reader as for gzip.
-                    try unpackTarball(gpa, ps.reader(), tmp_directory.handle, std.compress.xz);
-                } else if (mem.endsWith(u8, uri.path, "/")) {
-                    if (@TypeOf(ps.*) == fs.File) {
-                        std.log.info("is file: {s}", .{uri.path});
-
-                        const metadata = try ps.metadata();
-
-                        if (metadata.kind() == .Directory) {
-                            std.log.info("is directory: {s}", .{uri.path});
-
-                            var dir = try fs.cwd().openDir(uri.path, .{});
-                            defer dir.close();
-                            try dir.copyTree(gpa, tmp_directory.handle);
-                        } else {
-                            return report.fail(dep.url_tok, "unable to unpack non-directory '{s}' as directory", .{
-                                uri.path,
-                            });
-                        }
-                    } else {
-                        return report.fail(dep.url_tok, "unable to fetch directory '{s}'' over http", .{
-                            uri.path,
-                        });
-                    }
-                } else {
-                    return report.fail(dep.url_tok, "unknown file extension for URI '{s}'", .{
-                        uri.path,
-                    });
-                }
-            },
-        }
-
-        // TODO: delete files not included in the package prior to computing the package hash.
-        // for example, if the ini file has directives to include/not include certain files,
-        // apply those rules directly to the filesystem right here. This ensures that files
-        // not protected by the hash are not present on the file system.
-
-        break :a try computePackageHash(thread_pool, .{ .dir = tmp_directory.handle });
-    };
-
-    const pkg_dir_sub_path = "p" ++ s ++ Manifest.hexDigest(actual_hash);
-    try renameTmpIntoCache(global_cache_directory.handle, tmp_dir_sub_path, pkg_dir_sub_path);
-
-    const actual_hex = Manifest.hexDigest(actual_hash);
+    const actual_hex = Manifest.hexDigest(package_location.hash);
     if (dep.hash) |h| {
         if (!mem.eql(u8, h, &actual_hex)) {
             return report.fail(dep.hash_tok, "hash mismatch: expected: {s}, found: {s}", .{
@@ -520,14 +605,11 @@ fn fetchAndUnpack(
         return report.failWithNotes(&notes, dep.url_tok, "url field is missing corresponding hash field", .{});
     }
 
-    const build_root = try global_cache_directory.join(gpa, &.{pkg_dir_sub_path});
-    defer gpa.free(build_root);
-
     try build_roots_source.writer().print("    pub const {s} = \"{}\";\n", .{
-        std.zig.fmtId(fqn), std.zig.fmtEscapes(build_root),
+        std.zig.fmtId(fqn), std.zig.fmtEscapes(package_location.dir_path),
     });
 
-    return createWithDir(gpa, fqn, global_cache_directory, pkg_dir_sub_path, build_zig_basename);
+    return create(gpa, fqn, package_location.dir_path, build_zig_basename);
 }
 
 fn unpackTarball(
@@ -661,7 +743,6 @@ fn renameTmpIntoCache(
     tmp_dir_sub_path: []const u8,
     dest_dir_sub_path: []const u8,
 ) !void {
-    assert(dest_dir_sub_path[1] == fs.path.sep);
     var handled_missing_dir = false;
     while (true) {
         cache_dir.rename(tmp_dir_sub_path, dest_dir_sub_path) catch |err| switch (err) {
