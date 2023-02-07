@@ -2447,6 +2447,10 @@ pub const Dir = struct {
         };
     }
 
+    const CopyTreeOptions = struct {
+        copy_file_options: CopyFileOptions = .{},
+    };
+
     /// Recursively copy the contents of directory `self` into `dest_dir`.
     /// Currently, only regular files and sub-directories are supported.
     /// Other file kinds return `error.InvalidFileType`.
@@ -2457,6 +2461,7 @@ pub const Dir = struct {
         self: Dir,
         gpa: Allocator,
         dest_dir: Dir,
+        options: CopyTreeOptions,
     ) !void {
         var iterable_dir = try self.openIterableDir(".", .{});
         defer iterable_dir.close();
@@ -2466,7 +2471,7 @@ pub const Dir = struct {
             switch (entry.kind) {
                 .File => {
                     std.log.info("File: {s}", .{entry.name});
-                    try self.copyFile(entry.name, dest_dir, entry.name, .{});
+                    try self.copyFile(entry.name, dest_dir, entry.name, options.copy_file_options);
                 },
                 .Directory => {
                     std.log.info("Directory: {s}", .{entry.name});
