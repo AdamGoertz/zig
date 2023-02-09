@@ -516,13 +516,13 @@ const PackageSource = struct {
             .@"tar.gz"
         else if (mem.endsWith(u8, uri.path, ".tar.xz"))
             .@"tar.xz"
-        // TODO: Use platform specific path separator, or standardize on '/'?
+            // TODO: Use platform specific path separator, or standardize on '/'?
         else if (mem.endsWith(u8, uri.path, "/"))
             .directory
-        // Other types here
+            // Other types here
         else ty: {
             // It's common to write directories without a trailing '/'.
-            // This is some special casing logic to detect directories if 
+            // This is some special casing logic to detect directories if
             // the file type cannot be determined from the extension.
             switch (try getPackageSourceType(uri)) {
                 .file => {
@@ -607,7 +607,7 @@ fn fetchAndUnpack(
     // If so, fetch it
     var package_source = PackageSource.init(uri, directory, http_client) catch |err| switch (err) {
         error.UnknownFileType => return report.fail(dep.url_tok, "unknown file type", .{}),
-        error.UnknownScheme => return report.fail(dep.url_tok, "unknown URI scheme: {s}", .{ uri.scheme }),
+        error.UnknownScheme => return report.fail(dep.url_tok, "unknown URI scheme: {s}", .{uri.scheme}),
         else => return err,
     };
     defer package_source.deinit();
