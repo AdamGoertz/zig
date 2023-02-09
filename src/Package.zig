@@ -347,15 +347,15 @@ const PackageSource = struct {
     resource: Resource,
     file_type: FileType,
 
-    const SourceType = enum {
-        file,
-        http_request,
-    };
-
     const FileType = enum {
         @"tar.gz",
         @"tar.xz",
         directory,
+    };
+
+    const SourceType = enum {
+        file,
+        http_request,
     };
 
     const Resource = union(SourceType) {
@@ -387,7 +387,7 @@ const PackageSource = struct {
                     .http_request = try http_client.request(uri, .{}, .{}),
                 },
             },
-            .file_type = try getFileType(uri),
+            .file_type = try getFileType(uri, directory),
         };
     }
 
@@ -396,8 +396,12 @@ const PackageSource = struct {
             .file => |*file| file.close(),
             .http_request => |*req| req.deinit(),
         }
+        ps.* = undefined;
     }
 
+    /// Unpack the package into the global cache directory.
+    /// If `ps` does not require unpacking (for example, if it is a directory), then no caching is performed.
+    /// In either case, the hash is computed and returned along with the path to the package.
     pub fn unpack(ps: *PackageSource, allocator: Allocator, thread_pool: *ThreadPool, global_cache_directory: Compilation.Directory) !PackageLocation {
         if (!ps.needsUnpacking()) {
             const package_path = try ps.getUnpackedPackagePath(allocator, global_cache_directory, null);
@@ -507,16 +511,30 @@ const PackageSource = struct {
         return package_source_map.get(uri.scheme) orelse error.UnknownScheme;
     }
 
-    fn getFileType(uri: std.Uri) error{UnknownFileType}!FileType {
+    fn getFileType(uri: std.Uri, directory: Compilation.Directory) !FileType {
         return if (mem.endsWith(u8, uri.path, ".tar.gz"))
             .@"tar.gz"
         else if (mem.endsWith(u8, uri.path, ".tar.xz"))
             .@"tar.xz"
+        // TODO: Use platform specific path separator, or standardize on '/'?
         else if (mem.endsWith(u8, uri.path, "/"))
             .directory
-            // Other types here
-        else
-            error.UnknownFileType;
+        // Other types here
+        else ty: {
+            // It's common to write directories without a trailing '/'.
+            // This is some special casing logic to detect directories if 
+            // the file type cannot be determined from the extension.
+            switch (try getPackageSourceType(uri)) {
+                .file => {
+                    var file = try directory.handle.openFile(uri.path, .{});
+                    defer file.close();
+                    const metadata = try file.metadata();
+                    // TODO: What about a symlink to a directory?
+                    break :ty if (metadata.kind() == .Directory) .directory else error.UnknownFileType;
+                },
+                else => break :ty error.UnknownFileType,
+            }
+        };
     }
 };
 
