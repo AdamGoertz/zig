@@ -767,6 +767,7 @@ fn renameTmpIntoCache(
     tmp_dir_sub_path: []const u8,
     dest_dir_sub_path: []const u8,
 ) !void {
+    assert(dest_dir_sub_path[1] == fs.path.sep);
     var handled_missing_dir = false;
     while (true) {
         cache_dir.rename(tmp_dir_sub_path, dest_dir_sub_path) catch |err| switch (err) {
