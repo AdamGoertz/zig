@@ -97,6 +97,7 @@ pub const ParseError = error{ UnexpectedCharacter, InvalidFormat, InvalidPort };
 /// Parses the URI or returns an error.
 /// The return value will contain unescaped strings pointing into the
 /// original `text`. Each component that is provided, will be non-`null`.
+/// Special casing is included for relative paths, identified by a leading '.' or '..'.
 pub fn parse(text: []const u8) ParseError!Uri {
     var reader = SliceReader{ .slice = text };
 

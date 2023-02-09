@@ -401,6 +401,7 @@ const PackageSource = struct {
     pub fn unpack(ps: *PackageSource, allocator: Allocator, thread_pool: *ThreadPool, global_cache_directory: Compilation.Directory) !PackageLocation {
         if (!ps.needsUnpacking()) {
             const package_path = try ps.getUnpackedPackagePath(allocator, global_cache_directory, null);
+            errdefer allocator.free(package_path);
             var package_dir = try fs.openIterableDirAbsolute(package_path, .{});
             defer package_dir.close();
             const actual_hash = try computePackageHash(thread_pool, .{ .dir = package_dir.dir });
@@ -454,6 +455,7 @@ const PackageSource = struct {
         const actual_hash = try computePackageHash(thread_pool, .{ .dir = tmp_directory.handle });
 
         const unpacked_path = try ps.getUnpackedPackagePath(allocator, global_cache_directory, actual_hash);
+        errdefer allocator.free(unpacked_path);
 
         const relative_unpacked_path = try fs.path.relative(allocator, global_cache_directory.path.?, unpacked_path);
         defer allocator.free(relative_unpacked_path);
@@ -493,7 +495,7 @@ const PackageSource = struct {
         };
     }
 
-    fn getPackageSourceType(uri: std.Uri) error{UnknownProtocol}!SourceType {
+    fn getPackageSourceType(uri: std.Uri) error{UnknownScheme}!SourceType {
         const package_source_map = std.ComptimeStringMap(
             SourceType,
             .{
@@ -502,7 +504,7 @@ const PackageSource = struct {
                 .{ "https", .http_request },
             },
         );
-        return package_source_map.get(uri.scheme) orelse error.UnknownProtocol;
+        return package_source_map.get(uri.scheme) orelse error.UnknownScheme;
     }
 
     fn getFileType(uri: std.Uri) error{UnknownFileType}!FileType {
@@ -585,7 +587,11 @@ fn fetchAndUnpack(
     const uri = try std.Uri.parse(dep.url);
 
     // If so, fetch it
-    var package_source = try PackageSource.init(uri, directory, http_client);
+    var package_source = PackageSource.init(uri, directory, http_client) catch |err| switch (err) {
+        error.UnknownFileType => return report.fail(dep.url_tok, "unknown file type", .{}),
+        error.UnknownScheme => return report.fail(dep.url_tok, "unknown URI scheme: {s}", .{ uri.scheme }),
+        else => return err,
+    };
     defer package_source.deinit();
 
     var package_location = try package_source.unpack(gpa, thread_pool, global_cache_directory);
