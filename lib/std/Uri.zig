@@ -140,7 +140,7 @@ pub fn parse(text: []const u8) ParseError!Uri {
 
         const authority = reader.readUntil(isAuthoritySeparator);
         if (authority.len == 0)
-            break :a ;
+            break :a;
 
         var start_of_host: usize = 0;
         if (std.mem.indexOf(u8, authority, "@")) |index| {
