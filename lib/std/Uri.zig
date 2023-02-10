@@ -138,9 +138,11 @@ pub fn parse(text: []const u8) ParseError!Uri {
         std.debug.assert(reader.get().? == '/');
         std.debug.assert(reader.get().? == '/');
 
-        const authority = reader.readUntil(isAuthoritySeparator);
-        if (authority.len == 0)
-            break :a;
+        var authority = reader.readUntil(isAuthoritySeparator);
+        if (authority.len == 0) {
+            if (reader.peekPrefix("/")) break :a 
+            else return error.InvalidFormat;
+        }
 
         var start_of_host: usize = 0;
         if (std.mem.indexOf(u8, authority, "@")) |index| {
@@ -325,6 +327,35 @@ test "with port" {
 
 test "should fail gracefully" {
     try std.testing.expectEqual(@as(ParseError!Uri, error.InvalidFormat), parse("foobar://"));
+}
+
+test "file" {
+    const parsed = try parse("file:///");
+    try std.testing.expectEqualSlices(u8, "file", parsed.scheme);
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed.host);
+    try std.testing.expectEqualSlices(u8, "/", parsed.path);
+
+    const parsed2 = try parse("file:///an/absolute/path/to/something");
+    try std.testing.expectEqualSlices(u8, "file", parsed2.scheme);
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed2.host);
+    try std.testing.expectEqualSlices(u8, "/an/absolute/path/to/something", parsed2.path);
+
+    const parsed3 = try parse("file://localhost/an/absolute/path/to/another/thing/");
+    try std.testing.expectEqualSlices(u8, "file", parsed3.scheme);
+    try std.testing.expectEqualSlices(u8, "localhost", parsed3.host.?);
+    try std.testing.expectEqualSlices(u8, "/an/absolute/path/to/another/thing/", parsed3.path);
+}
+
+test "relative path" {
+    const parsed = try parse("./foo/bar");
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed.host);
+    try std.testing.expectEqualSlices(u8, "file", parsed.scheme);
+    try std.testing.expectEqualSlices(u8, "./foo/bar", parsed.path);
+
+    const parsed2 = try parse("../home/user/baz");
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed2.host);
+    try std.testing.expectEqualSlices(u8, "file", parsed2.scheme);
+    try std.testing.expectEqualSlices(u8, "../home/user/baz", parsed2.path);
 }
 
 test "scheme" {
