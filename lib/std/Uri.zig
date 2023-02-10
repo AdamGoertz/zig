@@ -140,8 +140,7 @@ pub fn parse(text: []const u8) ParseError!Uri {
 
         var authority = reader.readUntil(isAuthoritySeparator);
         if (authority.len == 0) {
-            if (reader.peekPrefix("/")) break :a 
-            else return error.InvalidFormat;
+            if (reader.peekPrefix("/")) break :a else return error.InvalidFormat;
         }
 
         var start_of_host: usize = 0;
