@@ -602,12 +602,27 @@ fn fetchAndUnpack(
 ) !*Package {
     const gpa = http_client.allocator;
 
-    const uri = try std.Uri.parse(dep.url);
+    const uri = switch (dep.location) {
+        .url => |url| std.Uri.parse(url) catch |err| switch (err) {
+            error.UnexpectedCharacter => return report.fail(dep.location_tok, "failed to parse dependency location. Did you use 'url' instead of 'path'?", .{}),
+            else => return err,
+        },
+        .path => |path| std.Uri{
+            .scheme = "file",
+            .user = null,
+            .password = null,
+            .host = null,
+            .port = null,
+            .path = path,
+            .query = null,
+            .fragment = null,
+        },
+    };
 
     // If so, fetch it
     var package_source = PackageSource.init(uri, directory, http_client) catch |err| switch (err) {
-        error.UnknownFileType => return report.fail(dep.url_tok, "unknown file type", .{}),
-        error.UnknownScheme => return report.fail(dep.url_tok, "unknown URI scheme: {s}", .{uri.scheme}),
+        error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type", .{}),
+        error.UnknownScheme => return report.fail(dep.location_tok, "unknown URI scheme: {s}", .{uri.scheme}),
         else => return err,
     };
     defer package_source.deinit();
@@ -626,7 +641,7 @@ fn fetchAndUnpack(
         const notes: [1]Compilation.AllErrors.Message = .{.{ .plain = .{
             .msg = try std.fmt.allocPrint(report.arena, "expected .hash = \"{s}\",", .{&actual_hex}),
         } }};
-        return report.failWithNotes(&notes, dep.url_tok, "url field is missing corresponding hash field", .{});
+        return report.failWithNotes(&notes, dep.location_tok, "dependency is missing hash field", .{});
     }
 
     try build_roots_source.writer().print("    pub const {s} = \"{}\";\n", .{

@@ -97,23 +97,8 @@ pub const ParseError = error{ UnexpectedCharacter, InvalidFormat, InvalidPort };
 /// Parses the URI or returns an error.
 /// The return value will contain unescaped strings pointing into the
 /// original `text`. Each component that is provided, will be non-`null`.
-/// Special casing is included for relative paths, identified by a leading '.' or '..'.
 pub fn parse(text: []const u8) ParseError!Uri {
     var reader = SliceReader{ .slice = text };
-
-    // Interpret URIs with leading '.'s as relative paths.
-    if (reader.peekPrefix(".")) {
-        return Uri{
-            .scheme = "file",
-            .user = null,
-            .password = null,
-            .host = null,
-            .port = null,
-            .path = text,
-            .query = null,
-            .fragment = null,
-        };
-    }
 
     var uri = Uri{
         .scheme = reader.readWhile(isSchemeChar),
@@ -343,18 +328,6 @@ test "file" {
     try std.testing.expectEqualSlices(u8, "file", parsed3.scheme);
     try std.testing.expectEqualSlices(u8, "localhost", parsed3.host.?);
     try std.testing.expectEqualSlices(u8, "/an/absolute/path/to/another/thing/", parsed3.path);
-}
-
-test "relative path" {
-    const parsed = try parse("./foo/bar");
-    try std.testing.expectEqual(@as(?[]const u8, null), parsed.host);
-    try std.testing.expectEqualSlices(u8, "file", parsed.scheme);
-    try std.testing.expectEqualSlices(u8, "./foo/bar", parsed.path);
-
-    const parsed2 = try parse("../home/user/baz");
-    try std.testing.expectEqual(@as(?[]const u8, null), parsed2.host);
-    try std.testing.expectEqualSlices(u8, "file", parsed2.scheme);
-    try std.testing.expectEqualSlices(u8, "../home/user/baz", parsed2.path);
 }
 
 test "scheme" {
