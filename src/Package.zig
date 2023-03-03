@@ -683,7 +683,7 @@ fn fetchAndUnpack(
     report: Report,
     build_roots_source: *std.ArrayList(u8),
     fqn: []const u8,
-    all_modules: *AllModules
+    all_modules: *AllModules,
 ) !*Package {
     const gpa = http_client.allocator;
 
