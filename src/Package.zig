@@ -225,6 +225,7 @@ pub fn fetchAndAddDependencies(
     build_roots_source: *std.ArrayList(u8),
     name_prefix: []const u8,
     color: main.Color,
+    all_modules: *AllModules,
 ) !void {
     const max_bytes = 10 * 1024 * 1024;
     const gpa = thread_pool.allocator;
@@ -289,6 +290,7 @@ pub fn fetchAndAddDependencies(
             dep,
             build_roots_source,
             fqn,
+            all_modules,
         ) orelse try fetchAndUnpack(
             thread_pool,
             http_client,
@@ -298,6 +300,7 @@ pub fn fetchAndAddDependencies(
             report,
             build_roots_source,
             fqn,
+            all_modules,
         );
 
         try pkg.fetchAndAddDependencies(
@@ -311,6 +314,7 @@ pub fn fetchAndAddDependencies(
             build_roots_source,
             sub_prefix,
             color,
+            all_modules,
         );
 
         try add(pkg, gpa, fqn, sub_pkg);
@@ -607,31 +611,31 @@ const PackageSource = struct {
     }
 };
 
+const hex_multihash_len = 2 * Manifest.multihash_len;
+const MultiHashHexDigest = [hex_multihash_len]u8;
+/// This is to avoid creating multiple modules for the same build.zig file.
+pub const AllModules = std.AutoHashMapUnmanaged(MultiHashHexDigest, *Package);
+
 fn getCachedPackage(
     gpa: Allocator,
     global_cache_directory: Compilation.Directory,
     dep: Manifest.Dependency,
     build_roots_source: *std.ArrayList(u8),
     fqn: []const u8,
+    all_modules: *AllModules,
 ) !?*Package {
     const s = fs.path.sep_str;
     // Check if the expected_hash is already present in the global package
     // cache, and thereby avoid both fetching and unpacking.
-    if (dep.hash) |h| cached: {
-        const hex_multihash_len = 2 * Manifest.multihash_len;
+    if (dep.hash) |h| {
         const hex_digest = h[0..hex_multihash_len];
         const pkg_dir_sub_path = "p" ++ s ++ hex_digest;
+
         var pkg_dir = global_cache_directory.handle.openDir(pkg_dir_sub_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => break :cached,
+            error.FileNotFound => return null,
             else => |e| return e,
         };
         errdefer pkg_dir.close();
-
-        const ptr = try gpa.create(Package);
-        errdefer gpa.destroy(ptr);
-
-        const owned_src_path = try gpa.dupe(u8, build_zig_basename);
-        errdefer gpa.free(owned_src_path);
 
         const build_root = try global_cache_directory.join(gpa, &.{pkg_dir_sub_path});
         errdefer gpa.free(build_root);
@@ -639,6 +643,20 @@ fn getCachedPackage(
         try build_roots_source.writer().print("    pub const {s} = \"{}\";\n", .{
             std.zig.fmtId(fqn), std.zig.fmtEscapes(build_root),
         });
+
+        // The compiler has a rule that a file must not be included in multiple modules,
+        // so we must detect if a module has been created for this package and reuse it.
+        const gop = try all_modules.getOrPut(gpa, hex_digest.*);
+        if (gop.found_existing) {
+            gpa.free(build_root);
+            return gop.value_ptr.*;
+        }
+
+        const ptr = try gpa.create(Package);
+        errdefer gpa.destroy(ptr);
+
+        const owned_src_path = try gpa.dupe(u8, build_zig_basename);
+        errdefer gpa.free(owned_src_path);
 
         ptr.* = .{
             .root_src_directory = .{
@@ -649,6 +667,7 @@ fn getCachedPackage(
             .root_src_path = owned_src_path,
         };
 
+        gop.value_ptr.* = ptr;
         return ptr;
     }
 
@@ -664,6 +683,7 @@ fn fetchAndUnpack(
     report: Report,
     build_roots_source: *std.ArrayList(u8),
     fqn: []const u8,
+    all_modules: *AllModules
 ) !*Package {
     const gpa = http_client.allocator;
 
@@ -713,7 +733,15 @@ fn fetchAndUnpack(
         std.zig.fmtId(fqn), std.zig.fmtEscapes(package_location.dir_path),
     });
 
-    return create(gpa, package_location.dir_path, build_zig_basename);
+    const gop = try all_modules.getOrPut(gpa, actual_hex);
+
+    if (gop.found_existing) {
+        return gop.value_ptr.*;
+    } else {
+        const module = try create(gpa, package_location.dir_path, build_zig_basename);
+        gop.value_ptr.* = module;
+        return module;
+    }
 }
 
 fn unpackTarball(
@@ -739,7 +767,8 @@ fn unpackTarball(
 }
 
 const HashedFile = struct {
-    path: []const u8,
+    fs_path: []const u8,
+    normalized_path: []const u8,
     hash: [Manifest.Hash.digest_length]u8,
     failure: Error!void,
 
@@ -747,7 +776,7 @@ const HashedFile = struct {
 
     fn lessThan(context: void, lhs: *const HashedFile, rhs: *const HashedFile) bool {
         _ = context;
-        return mem.lessThan(u8, lhs.path, rhs.path);
+        return mem.lessThan(u8, lhs.normalized_path, rhs.normalized_path);
     }
 };
 
@@ -783,8 +812,10 @@ fn computePackageHash(
                 else => return error.IllegalFileTypeInPackage,
             }
             const hashed_file = try arena.create(HashedFile);
+            const fs_path = try arena.dupe(u8, entry.path);
             hashed_file.* = .{
-                .path = try arena.dupe(u8, entry.path),
+                .fs_path = fs_path,
+                .normalized_path = try normalizePath(arena, fs_path),
                 .hash = undefined, // to be populated by the worker
                 .failure = undefined, // to be populated by the worker
             };
@@ -802,12 +833,30 @@ fn computePackageHash(
     for (all_files.items) |hashed_file| {
         hashed_file.failure catch |err| {
             any_failures = true;
-            std.log.err("unable to hash '{s}': {s}", .{ hashed_file.path, @errorName(err) });
+            std.log.err("unable to hash '{s}': {s}", .{ hashed_file.fs_path, @errorName(err) });
         };
         hasher.update(&hashed_file.hash);
     }
     if (any_failures) return error.PackageHashUnavailable;
     return hasher.finalResult();
+}
+
+/// Make a file system path identical independently of operating system path inconsistencies.
+/// This converts backslashes into forward slashes.
+fn normalizePath(arena: Allocator, fs_path: []const u8) ![]const u8 {
+    const canonical_sep = '/';
+
+    if (fs.path.sep == canonical_sep)
+        return fs_path;
+
+    const normalized = try arena.dupe(u8, fs_path);
+    for (normalized) |*byte| {
+        switch (byte.*) {
+            fs.path.sep => byte.* = canonical_sep,
+            else => continue,
+        }
+    }
+    return normalized;
 }
 
 fn workerHashFile(dir: fs.Dir, hashed_file: *HashedFile, wg: *WaitGroup) void {
@@ -817,10 +866,10 @@ fn workerHashFile(dir: fs.Dir, hashed_file: *HashedFile, wg: *WaitGroup) void {
 
 fn hashFileFallible(dir: fs.Dir, hashed_file: *HashedFile) HashedFile.Error!void {
     var buf: [8000]u8 = undefined;
-    var file = try dir.openFile(hashed_file.path, .{});
+    var file = try dir.openFile(hashed_file.fs_path, .{});
     defer file.close();
     var hasher = Manifest.Hash.init(.{});
-    hasher.update(hashed_file.path);
+    hasher.update(hashed_file.normalized_path);
     hasher.update(&.{ 0, @boolToInt(try isExecutable(file)) });
     while (true) {
         const bytes_read = try file.read(&buf);
