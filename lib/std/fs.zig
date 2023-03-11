@@ -2452,48 +2452,6 @@ pub const Dir = struct {
         };
     }
 
-    const CopyTreeOptions = struct {
-        copy_file_options: CopyFileOptions = .{},
-    };
-
-    /// Recursively copy the contents of directory `self` into `dest_dir`.
-    /// Currently, only regular files and sub-directories are supported.
-    /// Other file kinds return `error.InvalidFileType`.
-    /// TODO: How to handle failure during recursive copying.
-    ///       Should previously copied files be deleted,
-    ///       So the copy operation is atomic?
-    pub fn copyTree(
-        self: Dir,
-        gpa: Allocator,
-        dest_dir: Dir,
-        options: CopyTreeOptions,
-    ) !void {
-        var iterable_dir = try self.openIterableDir(".", .{});
-        defer iterable_dir.close();
-
-        var it = iterable_dir.iterate();
-        while (try it.next()) |entry| {
-            switch (entry.kind) {
-                .File => {
-                    std.log.info("File: {s}", .{entry.name});
-                    try self.copyFile(entry.name, dest_dir, entry.name, options.copy_file_options);
-                },
-                .Directory => {
-                    std.log.info("Directory: {s}", .{entry.name});
-                    var sub_dir = try self.openDir(entry.name, .{});
-                    defer sub_dir.close();
-
-                    try dest_dir.makeDir(entry.name);
-                    var sub_dest_dir = try dest_dir.openDir(entry.name, .{});
-                    defer sub_dest_dir.close();
-
-                    try sub_dir.copyTree(gpa, sub_dest_dir);
-                },
-                else => return error.InvalidFileType,
-            }
-        }
-    }
-
     /// Writes content to the file system, creating a new file if it does not exist, truncating
     /// if it already exists.
     pub fn writeFile(self: Dir, sub_path: []const u8, data: []const u8) !void {
