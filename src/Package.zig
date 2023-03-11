@@ -643,12 +643,6 @@ fn getCachedPackage(
         const build_root = try global_cache_directory.join(gpa, &.{pkg_dir_sub_path});
         errdefer gpa.free(build_root);
 
-        var pkg_dir = global_cache_directory.handle.openDir(pkg_dir_sub_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => break :cached,
-            else => |e| return e,
-        };
-        errdefer pkg_dir.close();
-
         try build_roots_source.writer().print("    pub const {s} = \"{}\";\n", .{
             std.zig.fmtId(fqn), std.zig.fmtEscapes(build_root),
         });
