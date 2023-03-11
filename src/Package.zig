@@ -711,6 +711,7 @@ fn fetchAndUnpack(
     var package_source = PackageSource.init(uri, directory, http_client) catch |err| switch (err) {
         error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type", .{}),
         error.UnknownScheme => return report.fail(dep.location_tok, "unknown URI scheme: {s}", .{uri.scheme}),
+        error.FileNotFound => return report.fail(dep.location_tok, "file not found: {s}", .{uri.path}),
         else => return err,
     };
     defer package_source.deinit();
