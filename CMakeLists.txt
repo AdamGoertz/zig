@@ -303,7 +303,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/os/linux.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/linux/io_uring.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/linux/x86_64.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/os/posix_spawn.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/windows.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/windows/ntstatus.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/windows/win32error.zig"
@@ -827,6 +826,12 @@ else()
   set(ZIG_STATIC_ARG "")
 endif()
 
+if(CMAKE_POSITION_INDEPENDENT_CODE)
+  set(ZIG_PIE_ARG="-Dpie")
+else()
+  set(ZIG_PIE_ARG="")
+endif()
+
 set(ZIG_BUILD_ARGS
   --zig-lib-dir "${CMAKE_SOURCE_DIR}/lib"
   "-Dconfig_h=${ZIG_CONFIG_H_OUT}"
@@ -835,6 +840,7 @@ set(ZIG_BUILD_ARGS
   ${ZIG_STATIC_ARG}
   ${ZIG_NO_LIB_ARG}
   ${ZIG_SINGLE_THREADED_ARG}
+  ${ZIG_PIE_ARG}
   "-Dtarget=${ZIG_TARGET_TRIPLE}"
   "-Dcpu=${ZIG_TARGET_MCPU}"
   "-Dversion-string=${RESOLVED_ZIG_VERSION}"

@@ -3144,13 +3144,32 @@ pub const Value = extern union {
     /// TODO: check for cases such as array that is not marked undef but all the element
     /// values are marked undef, or struct that is not marked undef but all fields are marked
     /// undef, etc.
-    pub fn anyUndef(self: Value) bool {
-        if (self.castTag(.aggregate)) |aggregate| {
-            for (aggregate.data) |val| {
-                if (val.anyUndef()) return true;
-            }
+    pub fn anyUndef(self: Value, mod: *Module) bool {
+        switch (self.tag()) {
+            .slice => {
+                const payload = self.castTag(.slice).?;
+                const len = payload.data.len.toUnsignedInt(mod.getTarget());
+
+                var elem_value_buf: ElemValueBuffer = undefined;
+                var i: usize = 0;
+                while (i < len) : (i += 1) {
+                    const elem_val = payload.data.ptr.elemValueBuffer(mod, i, &elem_value_buf);
+                    if (elem_val.anyUndef(mod)) return true;
+                }
+            },
+
+            .aggregate => {
+                const payload = self.castTag(.aggregate).?;
+                for (payload.data) |val| {
+                    if (val.anyUndef(mod)) return true;
+                }
+            },
+
+            .undef => return true,
+            else => {},
         }
-        return self.isUndef();
+
+        return false;
     }
 
     /// Asserts the value is not undefined and not unreachable.
@@ -3319,7 +3338,7 @@ pub const Value = extern union {
         }
     }
 
-    fn floatToValue(float: f128, arena: Allocator, dest_ty: Type, target: Target) !Value {
+    pub fn floatToValue(float: f128, arena: Allocator, dest_ty: Type, target: Target) !Value {
         switch (dest_ty.floatBits(target)) {
             16 => return Value.Tag.float_16.create(arena, @floatCast(f16, float)),
             32 => return Value.Tag.float_32.create(arena, @floatCast(f32, float)),
