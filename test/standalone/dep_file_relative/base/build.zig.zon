@@ -4,7 +4,7 @@
     .dependencies = .{
         .dep = .{
             .path = "../dep",
-            .hash = "122014d76c54e70d2556b9014c7f0c2e42ce9e0dce1c8daee158e35f3811d88a5664",
+            .hash = "12209aea37c363f387956b282e9c56a6467da47e41333f2aa983135bd56518e6eb1f",
         },
     },
 }
