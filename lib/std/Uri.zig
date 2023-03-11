@@ -124,7 +124,7 @@ pub fn parseWithoutScheme(text: []const u8) ParseError!Uri {
         .fragment = null,
     };
 
-    if (reader.peekPrefix("//")) { // authority part
+    if (reader.peekPrefix("//")) a: { // authority part
         std.debug.assert(reader.get().? == '/');
         std.debug.assert(reader.get().? == '/');
 
