@@ -592,8 +592,7 @@ const PackageSource = struct {
             .@"tar.gz"
         else if (mem.endsWith(u8, uri.path, ".tar.xz"))
             .@"tar.xz"
-            // TODO: Use platform specific path separator, or standardize on '/'?
-        else if (mem.endsWith(u8, uri.path, "/"))
+        else if (mem.endsWith(u8, uri.path, std.fs.path.sep_str))
             .directory
             // Other types here
         else ty: {
@@ -692,7 +691,7 @@ fn fetchAndUnpack(
 
     const uri = switch (dep.location) {
         .url => |url| std.Uri.parse(url) catch |err| switch (err) {
-            error.UnexpectedCharacter => return report.fail(dep.location_tok, "failed to parse dependency location. Did you use 'url' instead of 'path'?", .{}),
+            error.UnexpectedCharacter => return report.fail(dep.location_tok, "failed to parse dependency location as URI.", .{}),
             else => return err,
         },
         .path => |path| std.Uri{
@@ -701,15 +700,20 @@ fn fetchAndUnpack(
             .password = null,
             .host = null,
             .port = null,
-            .path = path,
+            .path = p: {
+                var new_path = try gpa.dupe(u8, path);
+                std.mem.replaceScalar(u8, new_path, '/', std.fs.path.sep);
+                break :p new_path;
+            },
             .query = null,
             .fragment = null,
         },
     };
+    defer if (std.meta.activeTag(dep.location) == .path) gpa.free(uri.path);
 
     // If so, fetch it
     var package_source = PackageSource.init(uri, directory, http_client) catch |err| switch (err) {
-        error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type", .{}),
+        error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type: {s}", .{std.fs.path.basename(uri.path)}),
         error.UnknownScheme => return report.fail(dep.location_tok, "unknown URI scheme: {s}", .{uri.scheme}),
         error.FileNotFound => return report.fail(dep.location_tok, "file not found: {s}", .{uri.path}),
         else => return err,
