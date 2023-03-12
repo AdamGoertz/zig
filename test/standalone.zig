@@ -115,4 +115,5 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
     cases.addBuildFile("test/standalone/dep_shared_builtin/build.zig", .{});
 
     cases.addBuildFile("test/standalone/dep_file_relative/base/build.zig", .{});
+    cases.addBuildFile("test/standalone/dep_file_relative_targz/base/build.zig", .{});
 }

@@ -1,0 +1,10 @@
+.{
+    .name = "base",
+    .version = "0.0.0",
+    .dependencies = .{
+        .dep = .{
+            .path = "../dep.tar.gz",
+            .hash = "1220265e2fd87f8448302bcb1a5920294ca5d6da456ee9acdff56eb4430c87892822",
+        },
+    },
+}
