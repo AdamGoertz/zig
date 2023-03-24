@@ -4263,7 +4263,7 @@ pub fn ensureFuncBodyAnalyzed(mod: *Module, func: *Fn) SemaError!void {
                 comp.emit_llvm_bc == null);
 
             const dump_air = builtin.mode == .Debug and comp.verbose_air;
-            const dump_llvm_ir = builtin.mode == .Debug and comp.verbose_llvm_ir;
+            const dump_llvm_ir = builtin.mode == .Debug and (comp.verbose_llvm_ir != null or comp.verbose_llvm_bc != null);
 
             if (no_bin_file and !dump_air and !dump_llvm_ir) return;
 
@@ -5949,7 +5949,7 @@ pub const PeerTypeCandidateSrc = union(enum) {
     none: void,
     /// When we want to know the the src of candidate i, look up at
     /// index i in this slice
-    override: []LazySrcLoc,
+    override: []?LazySrcLoc,
     /// resolvePeerTypes originates from a @TypeOf(...) call
     typeof_builtin_call_node_offset: i32,
 
@@ -6395,7 +6395,7 @@ pub fn linkerUpdateDecl(mod: *Module, decl_index: Decl.Index) !void {
         comp.emit_llvm_ir == null and
         comp.emit_llvm_bc == null);
 
-    const dump_llvm_ir = builtin.mode == .Debug and comp.verbose_llvm_ir;
+    const dump_llvm_ir = builtin.mode == .Debug and (comp.verbose_llvm_ir != null or comp.verbose_llvm_bc != null);
 
     if (no_bin_file and !dump_llvm_ir) return;
 

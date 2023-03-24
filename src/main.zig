@@ -370,10 +370,10 @@ const usage_build_generic =
     \\  -fno-emit-bin             Do not output machine code
     \\  -femit-asm[=path]         Output .s (assembly code)
     \\  -fno-emit-asm             (default) Do not output .s (assembly code)
-    \\  -femit-llvm-ir[=path]     Produce a .ll file with LLVM IR (requires LLVM extensions)
-    \\  -fno-emit-llvm-ir         (default) Do not produce a .ll file with LLVM IR
-    \\  -femit-llvm-bc[=path]     Produce a LLVM module as a .bc file (requires LLVM extensions)
-    \\  -fno-emit-llvm-bc         (default) Do not produce a LLVM module as a .bc file
+    \\  -femit-llvm-ir[=path]     Produce a .ll file with optimized LLVM IR (requires LLVM extensions)
+    \\  -fno-emit-llvm-ir         (default) Do not produce a .ll file with optimized LLVM IR
+    \\  -femit-llvm-bc[=path]     Produce an optimized LLVM module as a .bc file (requires LLVM extensions)
+    \\  -fno-emit-llvm-bc         (default) Do not produce an optimized LLVM module as a .bc file
     \\  -femit-h[=path]           Generate a C header file (.h)
     \\  -fno-emit-h               (default) Do not generate a C header file (.h)
     \\  -femit-docs[=path]        Create a docs/ dir with html documentation
@@ -555,13 +555,14 @@ const usage_build_generic =
     \\  --test-runner [path]           Specify a custom test runner
     \\
     \\Debug Options (Zig Compiler Development):
-    \\  -fopt-bisect-limit [limit]   Only run [limit] first LLVM optimization passes
+    \\  -fopt-bisect-limit=[limit]   Only run [limit] first LLVM optimization passes
     \\  -ftime-report                Print timing diagnostics
     \\  -fstack-report               Print stack size diagnostics
     \\  --verbose-link               Display linker invocations
     \\  --verbose-cc                 Display C compiler invocations
     \\  --verbose-air                Enable compiler debug output for Zig AIR
-    \\  --verbose-llvm-ir            Enable compiler debug output for LLVM IR
+    \\  --verbose-llvm-ir[=path]     Enable compiler debug output for unoptimized LLVM IR
+    \\  --verbose-llvm-bc=[path]     Enable compiler debug output for unoptimized LLVM BC
     \\  --verbose-cimport            Enable compiler debug output for C imports
     \\  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
     \\  --debug-log [scope]          Enable printing debug/info log messages for scope
@@ -704,7 +705,8 @@ fn buildOutputType(
     var verbose_link = (builtin.os.tag != .wasi or builtin.link_libc) and std.process.hasEnvVarConstant("ZIG_VERBOSE_LINK");
     var verbose_cc = (builtin.os.tag != .wasi or builtin.link_libc) and std.process.hasEnvVarConstant("ZIG_VERBOSE_CC");
     var verbose_air = false;
-    var verbose_llvm_ir = false;
+    var verbose_llvm_ir: ?[]const u8 = null;
+    var verbose_llvm_bc: ?[]const u8 = null;
     var verbose_cimport = false;
     var verbose_llvm_cpu_features = false;
     var time_report = false;
@@ -1441,7 +1443,11 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "--verbose-air")) {
                         verbose_air = true;
                     } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
-                        verbose_llvm_ir = true;
+                        verbose_llvm_ir = "-";
+                    } else if (mem.startsWith(u8, arg, "--verbose-llvm-ir=")) {
+                        verbose_llvm_ir = arg["--verbose-llvm-ir=".len..];
+                    } else if (mem.startsWith(u8, arg, "--verbose-llvm-bc=")) {
+                        verbose_llvm_bc = arg["--verbose-llvm-bc=".len..];
                     } else if (mem.eql(u8, arg, "--verbose-cimport")) {
                         verbose_cimport = true;
                     } else if (mem.eql(u8, arg, "--verbose-llvm-cpu-features")) {
@@ -3226,6 +3232,7 @@ fn buildOutputType(
         .verbose_link = verbose_link,
         .verbose_air = verbose_air,
         .verbose_llvm_ir = verbose_llvm_ir,
+        .verbose_llvm_bc = verbose_llvm_bc,
         .verbose_cimport = verbose_cimport,
         .verbose_llvm_cpu_features = verbose_llvm_cpu_features,
         .machine_code_model = machine_code_model,
@@ -3313,21 +3320,20 @@ fn buildOutputType(
 
             try server.listen(.{ .in = ip4_addr });
 
-            while (true) {
-                const conn = try server.accept();
-                defer conn.stream.close();
+            const conn = try server.accept();
+            defer conn.stream.close();
 
-                try serve(
-                    comp,
-                    .{ .handle = conn.stream.handle },
-                    .{ .handle = conn.stream.handle },
-                    test_exec_args.items,
-                    self_exe_path,
-                    arg_mode,
-                    all_args,
-                    runtime_args_start,
-                );
-            }
+            try serve(
+                comp,
+                .{ .handle = conn.stream.handle },
+                .{ .handle = conn.stream.handle },
+                test_exec_args.items,
+                self_exe_path,
+                arg_mode,
+                all_args,
+                runtime_args_start,
+            );
+            return cleanExit();
         },
     }
 
@@ -3458,9 +3464,7 @@ fn serve(
         const hdr = try server.receiveMessage();
 
         switch (hdr.tag) {
-            .exit => {
-                return cleanExit();
-            },
+            .exit => return,
             .update => {
                 assert(main_progress_node.recently_updated_child == null);
                 tracy.frameMark();
@@ -3844,15 +3848,43 @@ fn runOrTestHotSwap(
     if (runtime_args_start) |i| {
         try argv.appendSlice(all_args[i..]);
     }
-    var child = std.ChildProcess.init(argv.items, gpa);
 
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+    switch (builtin.target.os.tag) {
+        .macos, .ios, .tvos, .watchos => {
+            const PosixSpawn = std.os.darwin.PosixSpawn;
 
-    try child.spawn();
+            var attr = try PosixSpawn.Attr.init();
+            defer attr.deinit();
 
-    return child.id;
+            // ASLR is probably a good default for better debugging experience/programming
+            // with hot-code updates in mind. However, we can also make it work with ASLR on.
+            const flags: u16 = std.os.darwin.POSIX_SPAWN.SETSIGDEF |
+                std.os.darwin.POSIX_SPAWN.SETSIGMASK |
+                std.os.darwin.POSIX_SPAWN.DISABLE_ASLR;
+            try attr.set(flags);
+
+            var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+            defer arena_allocator.deinit();
+            const arena = arena_allocator.allocator();
+
+            const argv_buf = try arena.allocSentinel(?[*:0]u8, argv.items.len, null);
+            for (argv.items, 0..) |arg, i| argv_buf[i] = (try arena.dupeZ(u8, arg)).ptr;
+
+            const pid = try PosixSpawn.spawn(argv.items[0], null, attr, argv_buf, std.c.environ);
+            return pid;
+        },
+        else => {
+            var child = std.ChildProcess.init(argv.items, gpa);
+
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+
+            try child.spawn();
+
+            return child.id;
+        },
+    }
 }
 
 const AfterUpdateHook = union(enum) {
@@ -4253,7 +4285,6 @@ pub const usage_build =
     \\   --global-cache-dir [path]     Override path to global Zig cache directory
     \\   --zig-lib-dir [arg]           Override path to Zig lib directory
     \\   --build-runner [file]         Override path to build runner
-    \\   --prominent-compile-errors    Output compile errors formatted for a human to read
     \\   -h, --help                    Print this help and exit
     \\
 ;

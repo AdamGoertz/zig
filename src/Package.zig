@@ -462,8 +462,16 @@ const PackageSource = struct {
             .uri = uri,
             .root_dir = directory,
             .resource = switch (source_type) {
-                .file => .{
-                    .file = try fs.path.resolve(gpa, &.{ directory.path.?, uri.path }),
+                .file => f: {
+                    // Convert to OS-specific path separator. Path separators are doubled, so on Unix, '/' -> '//'
+                    // and on Windows '/' -> '\\'. This is because the URI path contains a single leading '/' which trips up
+                    // `resolve` on Windows, but it works correctly with a leading '\\'. I believe this will break UNC paths
+                    // on Windows, but file:/// uris may be able to achieve the same objective if we want to support networked
+                    // file systems.
+                    const owned_path = try std.mem.replaceOwned(u8, gpa, uri.path, "/", std.fs.path.sep_str ** 2);
+                    defer gpa.free(owned_path);
+                    const new_path = try fs.path.resolve(gpa, &.{ directory.path.?, owned_path });
+                    break :f .{ .file = new_path };
                 },
                 .http_request => .{
                     .http_request = try http_client.request(uri, .{}, .{}),
@@ -711,16 +719,11 @@ fn fetchAndUnpack(
             .password = null,
             .host = null,
             .port = null,
-            .path = p: {
-                var new_path = try gpa.dupe(u8, path);
-                std.mem.replaceScalar(u8, new_path, '/', std.fs.path.sep);
-                break :p new_path;
-            },
+            .path = path,
             .query = null,
             .fragment = null,
         },
     };
-    defer if (std.meta.activeTag(dep.location) == .path) gpa.free(uri.path);
 
     var package_source = PackageSource.init(gpa, uri, directory, http_client) catch |err| switch (err) {
         error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type: {s}", .{std.fs.path.basename(uri.path)}),
