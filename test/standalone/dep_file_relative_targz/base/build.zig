@@ -22,5 +22,6 @@ pub fn build(b: *std.Build) void {
     import_test.addModule("dep", dep_module);
 
     const test_step = b.step("test", "Run unit tests");
+    b.default_step = test_step;
     test_step.dependOn(&import_test.step);
 }
