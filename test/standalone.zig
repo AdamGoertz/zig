@@ -213,11 +213,6 @@ pub const build_cases = [_]BuildCase{
         .build_root = "test/standalone/issue_13030",
         .import = @import("standalone/issue_13030/build.zig"),
     },
-    // TODO restore this test
-    //.{
-    //    .build_root = "test/standalone/options",
-    //    .import = @import("standalone/options/build.zig"),
-    //},
     // .{
     //     .build_root = "test/standalone/dep_file_relative/base/",
     //     .import = @import("standalone/dep_file_relative/base/build.zig"),
