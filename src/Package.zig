@@ -567,7 +567,7 @@ const PackageSource = struct {
 
     /// Get the path to the unpacked package.
     /// The returned path is owned by the caller and must be freed using the provided allocator.
-    pub fn getUnpackedPackagePath(
+    fn getUnpackedPackagePath(
         ps: PackageSource,
         allocator: Allocator,
         global_cache_dir: Compilation.Directory,
