@@ -473,8 +473,15 @@ const PackageSource = struct {
                     const new_path = try fs.path.resolve(gpa, &.{ directory.path.?, owned_path });
                     break :f .{ .file = new_path };
                 },
-                .http_request => .{
-                    .http_request = try http_client.request(uri, .{}, .{}),
+                .http_request => r: {
+                    var h = std.http.Headers{ .allocator = gpa };
+                    defer h.deinit();
+
+                    var req = try http_client.request(.GET, uri, h, .{});
+                    try req.start();
+                    try req.do();
+
+                    break :r .{ .http_request = req };
                 },
             },
             .file_type = file_type,

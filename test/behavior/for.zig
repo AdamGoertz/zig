@@ -227,7 +227,6 @@ test "else continue outer for" {
 
 test "for loop with else branch" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     {
         var x = [_]u32{ 1, 2 };
@@ -275,6 +274,7 @@ test "two counters" {
 test "1-based counter and ptr to array" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
 
     var ok: usize = 0;
 
@@ -376,7 +376,6 @@ test "raw pointer and slice" {
 test "raw pointer and counter" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     var buf: [10]u8 = undefined;

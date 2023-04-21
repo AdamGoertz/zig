@@ -890,6 +890,10 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
 
             .wasm_memory_size => unreachable,
             .wasm_memory_grow => unreachable,
+
+            .work_item_id => unreachable,
+            .work_group_size => unreachable,
+            .work_group_id => unreachable,
             // zig fmt: on
         }
 
@@ -4318,16 +4322,10 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
             });
         } else if (func_value.castTag(.extern_fn)) |func_payload| {
             const extern_fn = func_payload.data;
-            const decl_name = mod.declPtr(extern_fn.owner_decl).name;
-            if (extern_fn.lib_name) |lib_name| {
-                log.debug("TODO enforce that '{s}' is expected in '{s}' library", .{
-                    decl_name,
-                    lib_name,
-                });
-            }
-
+            const decl_name = mem.sliceTo(mod.declPtr(extern_fn.owner_decl).name, 0);
+            const lib_name = mem.sliceTo(extern_fn.lib_name, 0);
             if (self.bin_file.cast(link.File.MachO)) |macho_file| {
-                const sym_index = try macho_file.getGlobalSymbol(mem.sliceTo(decl_name, 0));
+                const sym_index = try macho_file.getGlobalSymbol(decl_name, lib_name);
                 const atom = try macho_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
                 const atom_index = macho_file.getAtom(atom).getSymbolIndex().?;
                 _ = try self.addInst(.{
@@ -4340,7 +4338,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
                     },
                 });
             } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
-                const sym_index = try coff_file.getGlobalSymbol(mem.sliceTo(decl_name, 0));
+                const sym_index = try coff_file.getGlobalSymbol(decl_name, lib_name);
                 try self.genSetReg(Type.initTag(.u64), .x30, .{
                     .linker_load = .{
                         .type = .import,
@@ -5002,9 +5000,17 @@ fn airLoop(self: *Self, inst: Air.Inst.Index) !void {
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
     const loop = self.air.extraData(Air.Block, ty_pl.payload);
     const body = self.air.extra[loop.end..][0..loop.data.body_len];
+    const liveness_loop = self.liveness.getLoop(inst);
     const start_index = @intCast(u32, self.mir_instructions.len);
+
     try self.genBody(body);
     try self.jump(start_index);
+
+    try self.ensureProcessDeathCapacity(liveness_loop.deaths.len);
+    for (liveness_loop.deaths) |operand| {
+        self.processDeath(operand);
+    }
+
     return self.finishAirBookkeeping();
 }
 
@@ -6162,9 +6168,11 @@ fn genTypedValue(self: *Self, arg_tv: TypedValue) InnerError!MCValue {
         .mcv => |mcv| switch (mcv) {
             .none => .none,
             .undef => .undef,
-            .linker_load => |ll| .{ .linker_load = ll },
             .immediate => |imm| .{ .immediate = imm },
             .memory => |addr| .{ .memory = addr },
+            .load_got => |sym_index| .{ .linker_load = .{ .type = .got, .sym_index = sym_index } },
+            .load_direct => |sym_index| .{ .linker_load = .{ .type = .direct, .sym_index = sym_index } },
+            .load_tlv => unreachable, // TODO
         },
         .fail => |msg| {
             self.err_msg = msg;
