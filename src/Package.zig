@@ -459,14 +459,19 @@ const PackageSource = struct {
         const package_source: FetchLocation = switch (source_type) {
             .file => f: {
                 const path = if (builtin.os.tag == .windows) p: {
-                    const result = try std.Uri.unescapeString(gpa, uri.path);
-                    defer gpa.free(result);
-                    std.mem.replaceScalar(u8, result, '/', fs.path.sep);
+                    var uri_str = std.ArrayList(u8).init(gpa);
+                    defer uri_str.deinit();
+                    try uri.format("+/", .{}, uri_str.writer());
+                    const uri_str_z = try std.cstr.addNullByte(gpa, uri_str.items);
+                    defer gpa.free(uri_str_z);
 
-                    const truncated = if (std.mem.startsWith(u8, result, "\\") and
-                        !std.mem.startsWith(u8, result, "\\\\")) try gpa.dupe(u8, result[1..]) else try gpa.dupe(u8, result);
+                    var buf: [std.os.windows.MAX_PATH:0]u8 = undefined;
+                    var buf_len: std.os.windows.DWORD = std.os.windows.MAX_PATH;
+                    const result = std.os.windows.shlwapi.PathCreateFromUrlA(uri_str_z, &buf, &buf_len, 0);
 
-                    break :p truncated;
+                    if (result != std.os.windows.S_OK) return error.InvalidUri;
+
+                    break :p try gpa.dupe(u8, buf[0..buf_len]);
                 } else try std.Uri.unescapeString(gpa, uri.path);
                 defer gpa.free(path);
 
@@ -728,7 +733,7 @@ fn fetchAndUnpack(
 
     var package_source = PackageSource.init(gpa, uri, directory, http_client) catch |err| switch (err) {
         error.UnknownScheme => return report.fail(dep.location_tok, "unknown URI scheme: {s}", .{uri.scheme}),
-        // error.InvalidUri => return report.fail(dep.location_tok, "invalid URI", .{}),
+        error.InvalidUri => return report.fail(dep.location_tok, "invalid URI", .{}),
         else => return err,
     };
     defer package_source.deinit();

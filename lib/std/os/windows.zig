@@ -29,6 +29,7 @@ pub const ws2_32 = @import("windows/ws2_32.zig");
 pub const gdi32 = @import("windows/gdi32.zig");
 pub const winmm = @import("windows/winmm.zig");
 pub const crypt32 = @import("windows/crypt32.zig");
+pub const shlwapi = @import("windows/shlwapi.zig");
 
 pub const self_process_handle = @intToPtr(HANDLE, maxInt(usize));
 

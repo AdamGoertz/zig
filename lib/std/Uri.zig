@@ -222,8 +222,8 @@ pub fn format(
     if (needs_absolute) {
         try writer.writeAll(uri.scheme);
         try writer.writeAll(":");
-        try writer.writeAll("//");
         if (uri.host) |host| {
+            try writer.writeAll("//");
             if (uri.user) |user| {
                 try writer.writeAll(user);
                 if (uri.password) |password| {
@@ -686,4 +686,21 @@ test "URI unescaping" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
+test "format" {
+    const uri = Uri{
+        .scheme = "file",
+        .user = null,
+        .password = null,
+        .host = null,
+        .port = null,
+        .path = "/foo/bar/baz",
+        .query = null,
+        .fragment = null,
+    };
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+    try uri.format("+/", .{}, buf.writer());
+    try std.testing.expectEqualSlices(u8, "file:/foo/bar/baz", buf.items);
 }
