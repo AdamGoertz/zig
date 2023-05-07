@@ -453,7 +453,7 @@ const PackageSource = struct {
         }
     };
 
-    pub fn init(gpa: Allocator, uri: std.Uri, directory: Compilation.Directory, http_client: *std.http.Client) !PackageSource {
+    pub fn init(gpa: Allocator, uri: std.Uri, directory: Compilation.Directory, http_client: *std.http.Client) anyerror!PackageSource {
         const source_type = try getPackageSourceType(uri);
 
         const package_source: FetchLocation = switch (source_type) {
