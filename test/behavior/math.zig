@@ -377,7 +377,6 @@ fn testBinaryNot(x: u16) !void {
 
 test "binary not 128-bit" {
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -615,18 +614,6 @@ test "f128" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
-    if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64 and
-        builtin.zig_backend == .stage2_c)
-    {
-        // https://github.com/ziglang/zig/issues/13876
-        return error.SkipZigTest;
-    }
-
-    if (builtin.os.tag == .macos and builtin.zig_backend == .stage2_c) {
-        // TODO: test is failing
-        return error.SkipZigTest;
-    }
-
     try test_f128();
     comptime try test_f128();
 }
@@ -746,7 +733,6 @@ test "small int addition" {
 test "basic @mulWithOverflow" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     {
         var a: u8 = 86;
@@ -1138,7 +1124,6 @@ test "allow signed integer division/remainder when values are comptime-known and
 
 test "quad hex float literal parsing accurate" {
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -1297,18 +1282,6 @@ test "remainder division" {
         return error.SkipZigTest;
     }
 
-    if (builtin.zig_backend == .stage2_c and builtin.os.tag == .windows and
-        builtin.cpu.arch == .aarch64)
-    {
-        // https://github.com/ziglang/zig/issues/13876
-        return error.SkipZigTest;
-    }
-
-    if (builtin.os.tag == .macos and builtin.zig_backend == .stage2_c) {
-        // TODO: test is failing
-        return error.SkipZigTest;
-    }
-
     comptime try remdiv(f16);
     comptime try remdiv(f32);
     comptime try remdiv(f64);
@@ -1339,11 +1312,6 @@ test "float remainder division using @rem" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-
-    if (builtin.os.tag == .macos and builtin.zig_backend == .stage2_c and builtin.cpu.arch == .x86_64) {
-        // TODO: test is failing
-        return error.SkipZigTest;
-    }
 
     comptime try frem(f16);
     comptime try frem(f32);
@@ -1386,11 +1354,6 @@ test "float modulo division using @mod" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-
-    if (builtin.os.tag == .macos and builtin.zig_backend == .stage2_c and builtin.cpu.arch == .x86_64) {
-        // TODO: test is failing
-        return error.SkipZigTest;
-    }
 
     comptime try fmod(f16);
     comptime try fmod(f32);
@@ -1465,11 +1428,6 @@ test "@round f128" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
-    if (builtin.os.tag == .macos and builtin.zig_backend == .stage2_c) {
-        // TODO: test is failing
-        return error.SkipZigTest;
-    }
-
     try testRound(f128, 12.0);
     comptime try testRound(f128, 12.0);
 }
@@ -1507,18 +1465,6 @@ test "NaN comparison" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-
-    if (builtin.zig_backend == .stage2_c and builtin.os.tag == .windows and
-        builtin.cpu.arch == .aarch64)
-    {
-        // https://github.com/ziglang/zig/issues/13876
-        return error.SkipZigTest;
-    }
-
-    if (builtin.os.tag == .macos and builtin.zig_backend == .stage2_c) {
-        // TODO: test is failing
-        return error.SkipZigTest;
-    }
 
     try testNanEqNan(f16);
     try testNanEqNan(f32);
@@ -1586,20 +1532,7 @@ test "signed zeros are represented properly" {
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-
-    if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64 and
-        builtin.zig_backend == .stage2_c)
-    {
-        // TODO: test is failing
-        return error.SkipZigTest;
-    }
-
-    if (builtin.os.tag == .macos and builtin.zig_backend == .stage2_c and builtin.cpu.arch == .aarch64) {
-        // TODO: test is failing
-        return error.SkipZigTest;
-    }
 
     const S = struct {
         fn doTheTest() !void {

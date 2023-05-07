@@ -1,4 +1,4 @@
-//! Implements URI parsing roughly adhering to <https://tools.ietf.org/html/rfc3986>.
+//! Uniform Resource Identifier (URI) parsing roughly adhering to <https://tools.ietf.org/html/rfc3986>.
 //! Does not do perfect grammar and character class checking, but should be robust against URIs in the wild.
 
 const Uri = @This();
@@ -76,7 +76,7 @@ pub fn writeEscapedStringWithFn(writer: anytype, input: []const u8, comptime kee
 
 /// Parses a URI string and unescapes all %XX where XX is a valid hex number. Otherwise, verbatim copies
 /// them to the output.
-pub fn unescapeString(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]const u8 {
+pub fn unescapeString(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]u8 {
     var outsize: usize = 0;
     var inptr: usize = 0;
     while (inptr < input.len) {
@@ -222,9 +222,8 @@ pub fn format(
     if (needs_absolute) {
         try writer.writeAll(uri.scheme);
         try writer.writeAll(":");
+        try writer.writeAll("//");
         if (uri.host) |host| {
-            try writer.writeAll("//");
-
             if (uri.user) |user| {
                 try writer.writeAll(user);
                 if (uri.password) |password| {

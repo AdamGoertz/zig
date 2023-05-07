@@ -353,28 +353,6 @@ fn f2(x: bool) []const u8 {
     return (if (x) &fA else &fB)();
 }
 
-test "memcpy and memset intrinsics" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-
-    try testMemcpyMemset();
-    // TODO add comptime test coverage
-    //comptime try testMemcpyMemset();
-}
-
-fn testMemcpyMemset() !void {
-    var foo: [20]u8 = undefined;
-    var bar: [20]u8 = undefined;
-
-    @memset(&foo, 'A', foo.len);
-    @memcpy(&bar, &foo, bar.len);
-
-    try expect(bar[0] == 'A');
-    try expect(bar[11] == 'A');
-    try expect(bar[19] == 'A');
-}
-
 test "variable is allowed to be a pointer to an opaque type" {
     var x: i32 = 1234;
     _ = hereIsAnOpaqueType(@ptrCast(*OpaqueA, &x));
@@ -385,7 +363,6 @@ fn hereIsAnOpaqueType(ptr: *OpaqueA) *OpaqueA {
 }
 
 test "take address of parameter" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -413,7 +390,6 @@ test "array 2D const double ptr" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     const rect_2d_vertexes = [_][1]f32{
@@ -427,7 +403,6 @@ test "array 2D const double ptr with offset" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
 
     const rect_2d_vertexes = [_][2]f32{
@@ -441,7 +416,6 @@ test "array 3D const double ptr with offset" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     const rect_3d_vertexes = [_][2][2]f32{
@@ -717,7 +691,6 @@ fn manyptrConcat(comptime s: [*:0]const u8) [*:0]const u8 {
 test "comptime manyptr concatenation" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const s = "epic";
@@ -774,6 +747,7 @@ test "extern variable with non-pointer opaque type" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
 
     @export(var_to_export, .{ .name = "opaque_extern_var" });
     try expect(@ptrCast(*align(1) u32, &opaque_extern_var).* == 42);

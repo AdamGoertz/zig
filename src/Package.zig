@@ -5,6 +5,7 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const ascii = std.ascii;
 const assert = std.debug.assert;
 const log = std.log.scoped(.package);
 const main = @import("main.zig");
@@ -408,8 +409,7 @@ const PackageSource = struct {
     uri: std.Uri,
     /// Directory to which relative paths in URI are relative.
     root_dir: Compilation.Directory,
-    resource: Resource,
-    file_type: FileType,
+    fetch_location: FetchLocation,
 
     const FileType = enum {
         @"tar.gz",
@@ -422,7 +422,7 @@ const PackageSource = struct {
         http_request,
     };
 
-    const Resource = union(SourceType) {
+    const FetchLocation = union(SourceType) {
         /// The absolute path to a file or directory.
         /// This may be a file that requires unpacking (such as a .tar.gz),
         /// or the path to the root directory of a package.
@@ -455,60 +455,107 @@ const PackageSource = struct {
 
     pub fn init(gpa: Allocator, uri: std.Uri, directory: Compilation.Directory, http_client: *std.http.Client) !PackageSource {
         const source_type = try getPackageSourceType(uri);
-        const file_type = try getFileType(uri, directory);
+
+        const package_source: FetchLocation = switch (source_type) {
+            .file => f: {
+                const path = if (builtin.os.tag == .windows) p: {
+                    const result = try std.Uri.unescapeString(gpa, uri.path);
+                    defer gpa.free(result);
+                    std.mem.replaceScalar(u8, result, '/', fs.path.sep);
+
+                    const truncated = if (std.mem.startsWith(u8, result, "\\") and
+                        !std.mem.startsWith(u8, result, "\\\\")) try gpa.dupe(u8, result[1..]) else try gpa.dupe(u8, result);
+
+                    break :p truncated;
+                } else try std.Uri.unescapeString(gpa, uri.path);
+                defer gpa.free(path);
+
+                const new_path = try fs.path.resolve(gpa, &.{ directory.path.?, path });
+
+                break :f .{ .file = new_path };
+            },
+            .http_request => r: {
+                var h = std.http.Headers{ .allocator = gpa };
+                defer h.deinit();
+
+                var req = try http_client.request(.GET, uri, h, .{});
+
+                try req.start();
+                try req.wait();
+
+                break :r .{ .http_request = req };
+            },
+        };
 
         return .{
             .gpa = gpa,
             .uri = uri,
             .root_dir = directory,
-            .resource = switch (source_type) {
-                .file => f: {
-                    // Convert to OS-specific path separator. Path separators are doubled, so on Unix, '/' -> '//'
-                    // and on Windows '/' -> '\\'. This is because the URI path contains a single leading '/' which trips up
-                    // `resolve` on Windows, but it works correctly with a leading '\\'. I believe this will break UNC paths
-                    // on Windows, but file:/// uris may be able to achieve the same objective if we want to support networked
-                    // file systems.
-                    const owned_path = try std.mem.replaceOwned(u8, gpa, uri.path, "/", std.fs.path.sep_str ** 2);
-                    defer gpa.free(owned_path);
-                    const new_path = try fs.path.resolve(gpa, &.{ directory.path.?, owned_path });
-                    break :f .{ .file = new_path };
-                },
-                .http_request => r: {
-                    var h = std.http.Headers{ .allocator = gpa };
-                    defer h.deinit();
-
-                    var req = try http_client.request(.GET, uri, h, .{});
-                    try req.start();
-                    try req.do();
-
-                    break :r .{ .http_request = req };
-                },
-            },
-            .file_type = file_type,
+            .fetch_location = package_source,
         };
     }
 
     pub fn deinit(ps: *PackageSource) void {
-        switch (ps.resource) {
+        switch (ps.fetch_location) {
             .file => |path| ps.gpa.free(path),
             .http_request => |*req| req.deinit(),
         }
         ps.* = undefined;
     }
 
+    pub fn getFileType(ps: PackageSource) !FileType {
+        switch (ps.fetch_location) {
+            .file => |file| {
+                return if (mem.endsWith(u8, file, ".tar.gz"))
+                    .@"tar.gz"
+                else if (mem.endsWith(u8, file, ".tar.xz"))
+                    .@"tar.xz"
+                else if (mem.endsWith(u8, file, std.fs.path.sep_str))
+                    .directory
+                    // Other types here
+                else ty: {
+                    // It's common to write directories without a trailing '/'.
+                    // This is some special casing logic to detect directories if
+                    // the file type cannot be determined from the extension.
+                    var dir = ps.root_dir.handle.openDir(file, .{}) catch |err| switch (err) {
+                        error.NotDir => break :ty error.UnknownFileType,
+                        else => break :ty err,
+                    };
+                    defer dir.close();
+                    break :ty .directory;
+                };
+            },
+            .http_request => |req| {
+                const content_type = req.response.headers.getFirstValue("Content-Type") orelse
+                    return error.UnknownFileType;
+
+                // If the response has a different content type than the URI indicates, override
+                // the previously assumed file type.
+                if (ascii.eqlIgnoreCase(content_type, "application/gzip") or
+                    ascii.eqlIgnoreCase(content_type, "application/x-gzip"))
+                {
+                    return .@"tar.gz";
+                } else if (ascii.eqlIgnoreCase(content_type, "application/x-xz")) {
+                    return .@"tar.xz";
+                } else {
+                    return error.UnknownFileType;
+                }
+            },
+        }
+    }
+
     /// Unpack the package into the global cache directory.
     /// If `ps` does not require unpacking (for example, if it is a directory), then no caching is performed.
     /// In either case, the hash is computed and returned along with the path to the package.
     pub fn unpack(ps: *PackageSource, allocator: Allocator, thread_pool: *ThreadPool, global_cache_directory: Compilation.Directory) !PackageLocation {
-        if (!ps.needsUnpacking()) {
-            const package_path = try ps.getUnpackedPackagePath(allocator, global_cache_directory, null);
-            errdefer allocator.free(package_path);
-            var package_dir = try fs.openIterableDirAbsolute(package_path, .{});
+        const file_type = try ps.getFileType();
+        if (file_type == .directory) {
+            var package_dir = try fs.openIterableDirAbsolute(ps.fetch_location.file, .{});
             defer package_dir.close();
             const actual_hash = try computePackageHash(thread_pool, .{ .dir = package_dir.dir });
             return .{
                 .hash = actual_hash,
-                .dir_path = package_path,
+                .dir_path = try allocator.dupe(u8, ps.fetch_location.file),
             };
         }
 
@@ -531,7 +578,7 @@ const PackageSource = struct {
             };
             defer tmp_directory.closeAndFree(allocator);
 
-            var readable_resource: ReadableResource = switch (ps.resource) {
+            var readable_resource: ReadableResource = switch (ps.fetch_location) {
                 .file => |path| .{
                     .file = try fs.openFileAbsolute(path, .{}),
                 },
@@ -542,7 +589,7 @@ const PackageSource = struct {
             defer readable_resource.deinit();
 
             switch (readable_resource) {
-                inline else => |*r| switch (ps.file_type) {
+                inline else => |*r| switch (file_type) {
                     .@"tar.gz" => try unpackTarball(allocator, r.reader(), tmp_directory.handle, std.compress.gzip),
                     // I have not checked what buffer sizes the xz decompression implementation uses
                     // by default, so the same logic applies for buffering the reader as for gzip.
@@ -559,7 +606,8 @@ const PackageSource = struct {
             break :h try computePackageHash(thread_pool, .{ .dir = tmp_directory.handle });
         };
 
-        const unpacked_path = try ps.getUnpackedPackagePath(allocator, global_cache_directory, actual_hash);
+        const pkg_dir_sub_path = "p" ++ s ++ Manifest.hexDigest(actual_hash);
+        const unpacked_path = try global_cache_directory.join(allocator, &.{pkg_dir_sub_path});
         errdefer allocator.free(unpacked_path);
 
         const relative_unpacked_path = try fs.path.relative(allocator, global_cache_directory.path.?, unpacked_path);
@@ -569,34 +617,6 @@ const PackageSource = struct {
         return .{
             .hash = actual_hash,
             .dir_path = unpacked_path,
-        };
-    }
-
-    /// Get the path to the unpacked package.
-    /// The returned path is owned by the caller and must be freed using the provided allocator.
-    fn getUnpackedPackagePath(
-        ps: PackageSource,
-        allocator: Allocator,
-        global_cache_dir: Compilation.Directory,
-        hash_digest: ?[Manifest.Hash.digest_length]u8,
-    ) ![]const u8 {
-        switch (ps.file_type) {
-            .directory => return allocator.dupe(u8, ps.resource.file),
-            else => {
-                assert(hash_digest != null);
-
-                const s = fs.path.sep_str;
-                const pkg_dir_sub_path = "p" ++ s ++ Manifest.hexDigest(hash_digest.?);
-
-                return try global_cache_dir.join(allocator, &.{pkg_dir_sub_path});
-            },
-        }
-    }
-
-    fn needsUnpacking(ps: PackageSource) bool {
-        return switch (ps.file_type) {
-            .directory => false,
-            .@"tar.gz", .@"tar.xz" => true,
         };
     }
 
@@ -610,32 +630,6 @@ const PackageSource = struct {
             },
         );
         return package_source_map.get(uri.scheme) orelse error.UnknownScheme;
-    }
-
-    fn getFileType(uri: std.Uri, directory: Compilation.Directory) !FileType {
-        return if (mem.endsWith(u8, uri.path, ".tar.gz"))
-            .@"tar.gz"
-        else if (mem.endsWith(u8, uri.path, ".tar.xz"))
-            .@"tar.xz"
-        else if (mem.endsWith(u8, uri.path, std.fs.path.sep_str))
-            .directory
-            // Other types here
-        else ty: {
-            // It's common to write directories without a trailing '/'.
-            // This is some special casing logic to detect directories if
-            // the file type cannot be determined from the extension.
-            switch (try getPackageSourceType(uri)) {
-                .file => {
-                    var dir = directory.handle.openDir(uri.path, .{}) catch |err| switch (err) {
-                        error.NotDir => break :ty error.UnknownFileType,
-                        else => break :ty err,
-                    };
-                    defer dir.close();
-                    break :ty .directory;
-                },
-                else => break :ty error.UnknownFileType,
-            }
-        };
     }
 };
 
@@ -733,14 +727,14 @@ fn fetchAndUnpack(
     };
 
     var package_source = PackageSource.init(gpa, uri, directory, http_client) catch |err| switch (err) {
-        error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type: {s}", .{std.fs.path.basename(uri.path)}),
         error.UnknownScheme => return report.fail(dep.location_tok, "unknown URI scheme: {s}", .{uri.scheme}),
-        error.FileNotFound => return report.fail(dep.location_tok, "file not found: {s}", .{uri.path}),
+        // error.InvalidUri => return report.fail(dep.location_tok, "invalid URI", .{}),
         else => return err,
     };
     defer package_source.deinit();
 
     var package_location = package_source.unpack(gpa, thread_pool, global_cache_directory) catch |err| switch (err) {
+        error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type: {s}", .{uri.path}),
         error.FileNotFound => return report.fail(dep.location_tok, "file not found: {s}", .{uri.path}),
         else => return err,
     };

@@ -390,6 +390,19 @@ fn addFromDirInner(
         // Cross-product to get all possible test combinations
         for (backends) |backend| {
             for (targets) |target| {
+                if (backend == .stage2 and
+                    target.getCpuArch() != .wasm32 and target.getCpuArch() != .x86_64)
+                {
+                    // Other backends don't support new liveness format
+                    continue;
+                }
+                if (backend == .stage2 and target.getOsTag() == .macos and
+                    target.getCpuArch() == .x86_64 and builtin.cpu.arch == .aarch64)
+                {
+                    // Rosetta has issues with ZLD
+                    continue;
+                }
+
                 const next = ctx.cases.items.len;
                 try ctx.cases.append(.{
                     .name = std.fs.path.stem(filename),
@@ -452,7 +465,7 @@ pub fn lowerToBuildSteps(
     parent_step: *std.Build.Step,
     opt_test_filter: ?[]const u8,
     cases_dir_path: []const u8,
-    incremental_exe: *std.Build.CompileStep,
+    incremental_exe: *std.Build.Step.Compile,
 ) void {
     for (self.incremental_cases.items) |incr_case| {
         if (opt_test_filter) |test_filter| {

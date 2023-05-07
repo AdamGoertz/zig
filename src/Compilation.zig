@@ -2165,7 +2165,7 @@ fn wholeCacheModeSetBinFilePath(comp: *Compilation, digest: *const [Cache.hex_di
     const digest_start = 2; // "o/[digest]/[basename]"
 
     if (comp.whole_bin_sub_path) |sub_path| {
-        mem.copy(u8, sub_path[digest_start..], digest);
+        @memcpy(sub_path[digest_start..][0..digest.len], digest);
 
         comp.bin_file.options.emit = .{
             .directory = comp.local_cache_directory,
@@ -2174,7 +2174,7 @@ fn wholeCacheModeSetBinFilePath(comp: *Compilation, digest: *const [Cache.hex_di
     }
 
     if (comp.whole_implib_sub_path) |sub_path| {
-        mem.copy(u8, sub_path[digest_start..], digest);
+        @memcpy(sub_path[digest_start..][0..digest.len], digest);
 
         comp.bin_file.options.implib_emit = .{
             .directory = comp.local_cache_directory,
@@ -3095,6 +3095,7 @@ fn processOneJob(comp: *Compilation, job: Job, prog_node: *std.Progress.Node) !v
 
                 .file_failure,
                 .sema_failure,
+                .liveness_failure,
                 .codegen_failure,
                 .dependency_failure,
                 .sema_failure_retryable,
@@ -3145,7 +3146,7 @@ fn processOneJob(comp: *Compilation, job: Job, prog_node: *std.Progress.Node) !v
 
                 // emit-h only requires semantic analysis of the Decl to be complete,
                 // it does not depend on machine code generation to succeed.
-                .codegen_failure, .codegen_failure_retryable, .complete => {
+                .liveness_failure, .codegen_failure, .codegen_failure_retryable, .complete => {
                     const named_frame = tracy.namedFrame("emit_h_decl");
                     defer named_frame.end();
 
@@ -4431,7 +4432,7 @@ pub fn addCCArgs(
                     assert(prefix.len == prefix_len);
                     var march_buf: [prefix_len + letters.len + 1]u8 = undefined;
                     var march_index: usize = prefix_len;
-                    mem.copy(u8, &march_buf, prefix);
+                    @memcpy(march_buf[0..prefix.len], prefix);
 
                     if (std.Target.riscv.featureSetHas(target.cpu.features, .e)) {
                         march_buf[march_index] = 'e';
@@ -5264,7 +5265,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
 
     if (comp.bin_file.options.is_test) {
         try buffer.appendSlice(
-            \\pub var test_functions: []std.builtin.TestFn = undefined; // overwritten later
+            \\pub var test_functions: []const std.builtin.TestFn = undefined; // overwritten later
             \\
         );
         if (comp.test_evented_io) {

@@ -60,6 +60,8 @@ pub fn lowerMir(lower: *Lower, inst: Mir.Inst) Error![]const Instruction {
         .mfence,
         .mov,
         .movbe,
+        .movd,
+        .movq,
         .movzx,
         .mul,
         .neg,
@@ -92,25 +94,45 @@ pub fn lowerMir(lower: *Lower, inst: Mir.Inst) Error![]const Instruction {
         .xor,
 
         .addss,
+        .andnps,
+        .andps,
         .cmpss,
+        .cvtsi2ss,
         .divss,
         .maxss,
         .minss,
+        .movaps,
         .movss,
+        .movups,
         .mulss,
+        .orps,
+        .pextrw,
+        .pinsrw,
         .roundss,
+        .sqrtps,
+        .sqrtss,
         .subss,
         .ucomiss,
+        .xorps,
         .addsd,
+        .andnpd,
+        .andpd,
         .cmpsd,
+        .cvtsd2ss,
+        .cvtsi2sd,
+        .cvtss2sd,
         .divsd,
         .maxsd,
         .minsd,
         .movsd,
         .mulsd,
+        .orpd,
         .roundsd,
+        .sqrtpd,
+        .sqrtsd,
         .subsd,
         .ucomisd,
+        .xorpd,
         => try lower.mirGeneric(inst),
 
         .cmps,
@@ -136,7 +158,8 @@ pub fn lowerMir(lower: *Lower, inst: Mir.Inst) Error![]const Instruction {
         .setcc => try lower.mirSetcc(inst),
         .jcc => try lower.emit(.none, mnem_cc(.j, inst.data.inst_cc.cc), &.{.{ .imm = Immediate.s(0) }}),
 
-        .push_regs, .pop_regs => try lower.mirPushPopRegisterList(inst),
+        .push_regs => try lower.mirPushPopRegisterList(inst, .push),
+        .pop_regs => try lower.mirPushPopRegisterList(inst, .pop),
 
         .dbg_line,
         .dbg_prologue_end,
@@ -179,6 +202,8 @@ fn imm(lower: Lower, ops: Mir.Inst.Ops, i: u32) Immediate {
         .mi_rip_u,
         .lock_mi_sib_u,
         .lock_mi_rip_u,
+        .rmi_sib,
+        .rmi_rip,
         .mri_sib,
         .mri_rip,
         => Immediate.u(i),
@@ -190,9 +215,10 @@ fn imm(lower: Lower, ops: Mir.Inst.Ops, i: u32) Immediate {
 }
 
 fn mem(lower: Lower, ops: Mir.Inst.Ops, payload: u32) Memory {
-    return switch (ops) {
+    return lower.mir.resolveFrameLoc(switch (ops) {
         .rm_sib,
         .rm_sib_cc,
+        .rmi_sib,
         .m_sib,
         .m_sib_cc,
         .mi_sib_u,
@@ -208,6 +234,7 @@ fn mem(lower: Lower, ops: Mir.Inst.Ops, payload: u32) Memory {
 
         .rm_rip,
         .rm_rip_cc,
+        .rmi_rip,
         .m_rip,
         .m_rip_cc,
         .mi_rip_u,
@@ -227,7 +254,7 @@ fn mem(lower: Lower, ops: Mir.Inst.Ops, payload: u32) Memory {
         => lower.mir.extraData(Mir.MemoryMoffs, payload).data.decode(),
 
         else => unreachable,
-    };
+    });
 }
 
 fn emit(lower: *Lower, prefix: Prefix, mnemonic: Mnemonic, ops: []const Operand) Error!void {
@@ -301,6 +328,11 @@ fn mirGeneric(lower: *Lower, inst: Mir.Inst) Error!void {
         .rm_sib, .rm_rip => &.{
             .{ .reg = inst.data.rx.r },
             .{ .mem = lower.mem(inst.ops, inst.data.rx.payload) },
+        },
+        .rmi_sib, .rmi_rip => &.{
+            .{ .reg = inst.data.rix.r },
+            .{ .mem = lower.mem(inst.ops, inst.data.rix.payload) },
+            .{ .imm = lower.imm(inst.ops, inst.data.rix.i) },
         },
         .mr_sib, .lock_mr_sib, .mr_rip, .lock_mr_rip => &.{
             .{ .mem = lower.mem(inst.ops, inst.data.rx.payload) },
@@ -417,23 +449,15 @@ fn mirSetcc(lower: *Lower, inst: Mir.Inst) Error!void {
     }
 }
 
-fn mirPushPopRegisterList(lower: *Lower, inst: Mir.Inst) Error!void {
-    const save_reg_list = lower.mir.extraData(Mir.SaveRegisterList, inst.data.payload).data;
-    const base = @intToEnum(Register, save_reg_list.base_reg);
-    var disp: i32 = -@intCast(i32, save_reg_list.stack_end);
-    const reg_list = Mir.RegisterList.fromInt(save_reg_list.register_list);
+fn mirPushPopRegisterList(lower: *Lower, inst: Mir.Inst, comptime mnemonic: Mnemonic) Error!void {
+    const reg_list = Mir.RegisterList.fromInt(inst.data.payload);
     const callee_preserved_regs = abi.getCalleePreservedRegs(lower.target.*);
-    for (callee_preserved_regs) |callee_preserved_reg| {
-        if (!reg_list.isSet(callee_preserved_regs, callee_preserved_reg)) continue;
-        const reg_op = Operand{ .reg = callee_preserved_reg };
-        const mem_op = Operand{ .mem = Memory.sib(.qword, .{ .base = base, .disp = disp }) };
-        try lower.emit(.none, .mov, switch (inst.tag) {
-            .push_regs => &.{ mem_op, reg_op },
-            .pop_regs => &.{ reg_op, mem_op },
-            else => unreachable,
-        });
-        disp += 8;
-    }
+    var it = reg_list.iterator(.{ .direction = switch (mnemonic) {
+        .push => .reverse,
+        .pop => .forward,
+        else => unreachable,
+    } });
+    while (it.next()) |i| try lower.emit(.none, mnemonic, &.{.{ .reg = callee_preserved_regs[i] }});
 }
 
 fn mirLeaLinker(lower: *Lower, inst: Mir.Inst) Error!void {

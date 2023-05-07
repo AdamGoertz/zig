@@ -47,17 +47,8 @@ pub fn findByMnemonic(
         },
         else => {},
     } else false;
-    const rex_extended = for (ops) |op| switch (op) {
-        .reg => |r| if (r.isExtended()) break true,
-        .mem => |m| {
-            if (m.base()) |base| {
-                if (base.isExtended()) break true;
-            }
-            if (m.scaleIndex()) |si| {
-                if (si.index.isExtended()) break true;
-            }
-        },
-        else => {},
+    const rex_extended = for (ops) |op| {
+        if (op.isBaseExtended() or op.isIndexExtended()) break true;
     } else false;
 
     if ((rex_required or rex_extended) and rex_invalid) return error.CannotEncode;
@@ -67,11 +58,11 @@ pub fn findByMnemonic(
     next: for (mnemonic_to_encodings_map[@enumToInt(mnemonic)]) |data| {
         switch (data.mode) {
             .rex => if (!rex_required) continue,
-            .long => {},
+            .long, .sse_long, .sse2_long => {},
             else => if (rex_required) continue,
         }
         for (input_ops, data.ops) |input_op, data_op|
-            if (!input_op.isSubset(data_op, data.mode)) continue :next;
+            if (!input_op.isSubset(data_op)) continue :next;
 
         const enc = Encoding{ .mnemonic = mnemonic, .data = data };
         if (shortest_enc) |previous_shortest_enc| {
@@ -99,7 +90,7 @@ pub fn findByOpcode(opc: []const u8, prefixes: struct {
         if (prefixes.rex.w) {
             switch (data.mode) {
                 .short, .fpu, .sse, .sse2, .sse4_1, .none => continue,
-                .long, .rex => {},
+                .long, .sse_long, .sse2_long, .rex => {},
             }
         } else if (prefixes.rex.present and !prefixes.rex.isSet()) {
             switch (data.mode) {
@@ -147,7 +138,7 @@ pub fn modRmExt(encoding: Encoding) u3 {
 pub fn operandBitSize(encoding: Encoding) u64 {
     switch (encoding.data.mode) {
         .short => return 16,
-        .long => return 64,
+        .long, .sse_long, .sse2_long => return 64,
         else => {},
     }
     const bit_size: u64 = switch (encoding.data.op_en) {
@@ -172,7 +163,7 @@ pub fn format(
     _ = options;
     _ = fmt;
     switch (encoding.data.mode) {
-        .long => try writer.writeAll("REX.W + "),
+        .long, .sse_long, .sse2_long => try writer.writeAll("REX.W + "),
         else => {},
     }
 
@@ -273,24 +264,44 @@ pub const Mnemonic = enum {
     @"test", tzcnt,
     ud2,
     xadd, xchg, xor,
+    // MMX
+    movd,
     // SSE
     addss,
+    andps,
+    andnps,
     cmpss,
+    cvtsi2ss,
     divss,
     maxss, minss,
-    movss,
+    movaps, movss, movups,
     mulss,
+    orps,
+    pextrw,
+    pinsrw,
+    sqrtps,
+    sqrtss,
     subss,
     ucomiss,
+    xorps,
     // SSE2
     addsd,
+    andpd,
+    andnpd,
     //cmpsd,
+    cvtsd2ss, cvtsi2sd, cvtss2sd,
     divsd,
     maxsd, minsd,
-    movq, //movsd,
+    movapd,
+    movq, //movd, movsd,
+    movupd,
     mulsd,
+    orpd,
+    sqrtpd,
+    sqrtsd,
     subsd,
     ucomisd,
+    xorpd,
     // SSE4.1
     roundss,
     roundsd,
@@ -325,7 +336,7 @@ pub const Op = enum {
     m,
     moffs,
     sreg,
-    xmm, xmm_m32, xmm_m64,
+    xmm, xmm_m32, xmm_m64, xmm_m128,
     // zig fmt: on
 
     pub fn fromOperand(operand: Instruction.Operand) Op {
@@ -407,7 +418,7 @@ pub const Op = enum {
             .imm32, .imm32s, .eax, .r32, .m32, .rm32, .rel32, .xmm_m32 => 32,
             .imm64, .rax, .r64, .m64, .rm64, .xmm_m64 => 64,
             .m80 => 80,
-            .m128, .xmm => 128,
+            .m128, .xmm, .xmm_m128 => 128,
         };
     }
 
@@ -430,8 +441,8 @@ pub const Op = enum {
             .al, .ax, .eax, .rax,
             .r8, .r16, .r32, .r64,
             .rm8, .rm16, .rm32, .rm64,
-            .xmm, .xmm_m32, .xmm_m64,
-            =>  true,
+            .xmm, .xmm_m32, .xmm_m64, .xmm_m128,
+            => true,
             else => false,
         };
         // zig fmt: on
@@ -456,7 +467,7 @@ pub const Op = enum {
             .rm8, .rm16, .rm32, .rm64,
             .m8, .m16, .m32, .m64, .m80, .m128,
             .m,
-            .xmm_m32, .xmm_m64,
+            .xmm_m32, .xmm_m64, .xmm_m128,
             =>  true,
             else => false,
         };
@@ -470,15 +481,26 @@ pub const Op = enum {
         };
     }
 
+    pub fn class(op: Op) bits.Register.Class {
+        return switch (op) {
+            else => unreachable,
+            .al, .ax, .eax, .rax, .cl => .general_purpose,
+            .r8, .r16, .r32, .r64 => .general_purpose,
+            .rm8, .rm16, .rm32, .rm64 => .general_purpose,
+            .sreg => .segment,
+            .xmm, .xmm_m32, .xmm_m64, .xmm_m128 => .floating_point,
+        };
+    }
+
     pub fn isFloatingPointRegister(op: Op) bool {
         return switch (op) {
-            .xmm, .xmm_m32, .xmm_m64 => true,
+            .xmm, .xmm_m32, .xmm_m64, .xmm_m128 => true,
             else => false,
         };
     }
 
     /// Given an operand `op` checks if `target` is a subset for the purposes of the encoding.
-    pub fn isSubset(op: Op, target: Op, mode: Mode) bool {
+    pub fn isSubset(op: Op, target: Op) bool {
         switch (op) {
             .m, .o16, .o32, .o64 => unreachable,
             .moffs, .sreg => return op == target,
@@ -488,13 +510,13 @@ pub const Op = enum {
             },
             else => {
                 if (op.isRegister() and target.isRegister()) {
-                    switch (mode) {
-                        .sse, .sse2, .sse4_1 => return op.isFloatingPointRegister() and target.isFloatingPointRegister(),
-                        else => switch (target) {
-                            .cl, .al, .ax, .eax, .rax => return op == target,
-                            else => return op.bitSize() == target.bitSize(),
+                    return switch (target) {
+                        .cl, .al, .ax, .eax, .rax => op == target,
+                        else => op.class() == target.class() and switch (target.class()) {
+                            .floating_point => true,
+                            else => op.bitSize() == target.bitSize(),
                         },
-                    }
+                    };
                 }
                 if (op.isMemory() and target.isMemory()) {
                     switch (target) {
@@ -531,7 +553,9 @@ pub const Mode = enum {
     rex,
     long,
     sse,
+    sse_long,
     sse2,
+    sse2_long,
     sse4_1,
 };
 
@@ -541,10 +565,10 @@ fn estimateInstructionLength(prefix: Prefix, encoding: Encoding, ops: []const Op
         .encoding = encoding,
         .ops = [1]Operand{.none} ** 4,
     };
-    std.mem.copy(Operand, &inst.ops, ops);
+    @memcpy(inst.ops[0..ops.len], ops);
 
     var cwriter = std.io.countingWriter(std.io.null_writer);
-    inst.encode(cwriter.writer()) catch unreachable; // Not allowed to fail here unless OOM.
+    inst.encode(cwriter.writer(), .{ .allow_frame_loc = true }) catch unreachable; // Not allowed to fail here unless OOM.
     return @intCast(usize, cwriter.bytes_written);
 }
 
@@ -570,8 +594,10 @@ const mnemonic_to_encodings_map = init: {
             .modrm_ext = entry[4],
             .mode = entry[5],
         };
-        std.mem.copy(Op, &data.ops, entry[2]);
-        std.mem.copy(u8, &data.opc, entry[3]);
+        // TODO: use `@memcpy` for these. When I did that, I got a false positive
+        // compile error for this copy happening at compile time.
+        std.mem.copyForwards(Op, &data.ops, entry[2]);
+        std.mem.copyForwards(u8, &data.opc, entry[3]);
 
         while (mnemonic_int < @enumToInt(entry[0])) : (mnemonic_int += 1) {
             mnemonic_map[mnemonic_int] = data_storage[mnemonic_start..data_index];
