@@ -743,12 +743,14 @@ fn fetchAndUnpack(
     };
     defer fetch_location.deinit(gpa);
 
-    var readable_resource = try fetch_location.fetch(gpa, directory, http_client);
+    var readable_resource = try fetch_location.fetch(gpa, directory, http_client) catch |err| switch (err) {
+        error.FileNotFound => return report.fail(dep.location_tok, "file not found: {s}", .{uri.path}),
+        else => return err,
+    };
     defer readable_resource.deinit(gpa);
 
     var package_location = readable_resource.unpack(gpa, thread_pool, global_cache_directory) catch |err| switch (err) {
         error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type: {s}", .{uri.path}),
-        error.FileNotFound => return report.fail(dep.location_tok, "file not found: {s}", .{uri.path}),
         else => return err,
     };
     defer package_location.deinit(gpa);
