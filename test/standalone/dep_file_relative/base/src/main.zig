@@ -1,8 +1,0 @@
-const std = @import("std");
-const dep = @import("dep");
-
-pub fn main() void {}
-
-test "mul" {
-    try std.testing.expectEqual(@as(i32, 50), dep.mul(5, 10));
-}
