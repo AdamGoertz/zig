@@ -411,8 +411,9 @@ const FetchLocation = union(SourceType) {
     file: []const u8,
     http_request: std.Uri,
 
-    pub fn init(gpa: Allocator, uri: std.Uri, directory: Compilation.Directory) anyerror!FetchLocation {
-        const source_type = try getPackageSourceType(uri);
+    pub fn init(gpa: Allocator, uri: std.Uri, directory: Compilation.Directory, dep: Manifest.Dependency, report: Report) !FetchLocation {
+        const source_type = getPackageSourceType(uri) catch
+            return report.fail(dep.location_tok, "Unknown scheme: {s}", .{uri.scheme});
 
         return switch (source_type) {
             .file => f: {
@@ -427,7 +428,7 @@ const FetchLocation = union(SourceType) {
                     var buf_len: std.os.windows.DWORD = std.os.windows.MAX_PATH;
                     const result = std.os.windows.shlwapi.PathCreateFromUrlA(uri_str_z, &buf, &buf_len, 0);
 
-                    if (result != std.os.windows.S_OK) return error.InvalidUri;
+                    if (result != std.os.windows.S_OK) return report.fail(dep.location_tok, "Invalid URI", .{});
 
                     break :p try gpa.dupe(u8, buf[0..buf_len]);
                 } else try std.Uri.unescapeString(gpa, uri.path);
@@ -486,10 +487,20 @@ const FetchLocation = union(SourceType) {
         };
     }
 
-    pub fn fetch(f: FetchLocation, gpa: Allocator, root_dir: Compilation.Directory, http_client: *std.http.Client) !ReadableResource {
+    pub fn fetch(
+        f: FetchLocation,
+        gpa: Allocator,
+        root_dir: Compilation.Directory,
+        http_client: *std.http.Client,
+        dep: Manifest.Dependency,
+        report: Report,
+    ) !ReadableResource {
         switch (f) {
             .file => |file| {
-                return if (try isDirectory(file, root_dir))
+                const is_dir = isDirectory(file, root_dir) catch
+                    return report.fail(dep.location_tok, "File not found: {s}", .{file});
+
+                return if (is_dir)
                     .{
                         .path = try gpa.dupe(u8, file),
                         .resource = .{ .directory = try fs.openIterableDirAbsolute(file, .{}) },
@@ -508,6 +519,13 @@ const FetchLocation = union(SourceType) {
 
                 try req.start();
                 try req.wait();
+
+                if (req.response.status != .ok) {
+                    return report.fail(dep.location_tok, "Expected response status '200 OK' got '{} {s}'", .{
+                        @enumToInt(req.response.status),
+                        req.response.status.phrase() orelse "",
+                    });
+                }
 
                 return .{
                     .path = try gpa.dupe(u8, uri.path),
@@ -529,7 +547,14 @@ const ReadableResource = struct {
     /// Unpack the package into the global cache directory.
     /// If `ps` does not require unpacking (for example, if it is a directory), then no caching is performed.
     /// In either case, the hash is computed and returned along with the path to the package.
-    pub fn unpack(rr: *ReadableResource, allocator: Allocator, thread_pool: *ThreadPool, global_cache_directory: Compilation.Directory) !PackageLocation {
+    pub fn unpack(
+        rr: *ReadableResource,
+        allocator: Allocator,
+        thread_pool: *ThreadPool,
+        global_cache_directory: Compilation.Directory,
+        dep: Manifest.Dependency,
+        report: Report,
+    ) !PackageLocation {
         switch (rr.resource) {
             .directory => |dir| {
                 const actual_hash = try computePackageHash(thread_pool, dir);
@@ -558,7 +583,7 @@ const ReadableResource = struct {
                     };
                     defer tmp_directory.closeAndFree(allocator);
 
-                    switch (try rr.getFileType()) {
+                    switch (try rr.getFileType(dep, report)) {
                         .@"tar.gz" => try unpackTarball(allocator, r.reader(), tmp_directory.handle, std.compress.gzip),
                         // I have not checked what buffer sizes the xz decompression implementation uses
                         // by default, so the same logic applies for buffering the reader as for gzip.
@@ -594,7 +619,7 @@ const ReadableResource = struct {
         @"tar.xz",
     };
 
-    pub fn getFileType(rr: ReadableResource) error{ UnknownFileType, IsDir }!FileType {
+    pub fn getFileType(rr: ReadableResource, dep: Manifest.Dependency, report: Report) !FileType {
         switch (rr.resource) {
             .file => {
                 return if (mem.endsWith(u8, rr.path, ".tar.gz"))
@@ -602,22 +627,32 @@ const ReadableResource = struct {
                 else if (mem.endsWith(u8, rr.path, ".tar.xz"))
                     .@"tar.xz"
                 else
-                    error.UnknownFileType;
+                    return report.fail(dep.location_tok, "Unknown file type", .{});
             },
             .directory => return error.IsDir,
             .http_request => |req| {
                 const content_type = req.response.headers.getFirstValue("Content-Type") orelse
-                    return error.UnknownFileType;
+                    return report.fail(dep.location_tok, "Missing 'Content-Type' header", .{});
 
                 // If the response has a different content type than the URI indicates, override
                 // the previously assumed file type.
                 return if (ascii.eqlIgnoreCase(content_type, "application/gzip") or
-                    ascii.eqlIgnoreCase(content_type, "application/x-gzip"))
+                    ascii.eqlIgnoreCase(content_type, "application/x-gzip") or
+                    ascii.eqlIgnoreCase(content_type, "application/tar+gzip"))
                     .@"tar.gz"
                 else if (ascii.eqlIgnoreCase(content_type, "application/x-xz"))
                     .@"tar.xz"
-                else
-                    error.UnknownFileType;
+                else if (ascii.eqlIgnoreCase(content_type, "application/octet-stream")) ty: {
+                    // support gitlab tarball urls such as https://gitlab.com/<namespace>/<project>/-/archive/<sha>/<project>-<sha>.tar.gz
+                    // whose content-disposition header is: 'attachment; filename="<project>-<sha>.tar.gz"'
+                    const content_disposition = req.response.headers.getFirstValue("Content-Disposition") orelse
+                        return report.fail(dep.location_tok, "Missing 'Content-Disposition' header for Content-Type=application/octet-stream", .{});
+                    if (mem.startsWith(u8, content_disposition, "attachment;") and
+                        mem.endsWith(u8, content_disposition, ".tar.gz\""))
+                    {
+                        break :ty .@"tar.gz";
+                    } else return report.fail(dep.location_tok, "Unsupported 'Content-Disposition' header value: '{s}' for Content-Type=application/octet-stream", .{content_disposition});
+                } else return report.fail(dep.location_tok, "Unrecognized value for 'Content-Type' header: {s}", .{content_type});
             },
         }
     }
@@ -736,23 +771,13 @@ fn fetchAndUnpack(
         },
     };
 
-    var fetch_location = FetchLocation.init(gpa, uri, directory) catch |err| switch (err) {
-        error.UnknownScheme => return report.fail(dep.location_tok, "unknown URI scheme: {s}", .{uri.scheme}),
-        error.InvalidUri => return report.fail(dep.location_tok, "invalid URI", .{}),
-        else => return err,
-    };
+    var fetch_location = try FetchLocation.init(gpa, uri, directory, dep, report);
     defer fetch_location.deinit(gpa);
 
-    var readable_resource = try fetch_location.fetch(gpa, directory, http_client) catch |err| switch (err) {
-        error.FileNotFound => return report.fail(dep.location_tok, "file not found: {s}", .{uri.path}),
-        else => return err,
-    };
+    var readable_resource = try fetch_location.fetch(gpa, directory, http_client, dep, report);
     defer readable_resource.deinit(gpa);
 
-    var package_location = readable_resource.unpack(gpa, thread_pool, global_cache_directory) catch |err| switch (err) {
-        error.UnknownFileType => return report.fail(dep.location_tok, "unknown file type: {s}", .{uri.path}),
-        else => return err,
-    };
+    var package_location = try readable_resource.unpack(gpa, thread_pool, global_cache_directory, dep, report);
     defer package_location.deinit(gpa);
 
     const actual_hex = Manifest.hexDigest(package_location.hash);
