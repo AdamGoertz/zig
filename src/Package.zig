@@ -216,7 +216,7 @@ pub const build_zig_basename = "build.zig";
 
 pub fn fetchAndAddDependencies(
     pkg: *Package,
-    root_pkg: *Package,
+    deps_pkg: *Package,
     arena: Allocator,
     thread_pool: *ThreadPool,
     http_client: *std.http.Client,
@@ -272,7 +272,6 @@ pub fn fetchAndAddDependencies(
         .error_bundle = error_bundle,
     };
 
-    var any_error = false;
     const deps_list = manifest.dependencies.values();
     for (manifest.dependencies.keys(), 0..) |name, i| {
         const dep = deps_list[i];
@@ -287,42 +286,50 @@ pub fn fetchAndAddDependencies(
             build_roots_source,
             fqn,
             all_modules,
-        ) orelse try fetchAndUnpack(
-            thread_pool,
-            http_client,
-            directory,
-            global_cache_directory,
-            dep,
-            report,
-            build_roots_source,
-            fqn,
-            all_modules,
-        );
+        ) orelse m: {
+            const mod = try fetchAndUnpack(
+                thread_pool,
+                http_client,
+                directory,
+                global_cache_directory,
+                dep,
+                report,
+                build_roots_source,
+                fqn,
+                all_modules,
+            );
 
-        try sub_pkg.fetchAndAddDependencies(
-            root_pkg,
-            arena,
-            thread_pool,
-            http_client,
-            sub_pkg.root_src_directory,
-            global_cache_directory,
-            local_cache_directory,
-            dependencies_source,
-            build_roots_source,
-            sub_prefix,
-            error_bundle,
-            all_modules,
-        );
+            try mod.fetchAndAddDependencies(
+                deps_pkg,
+                arena,
+                thread_pool,
+                http_client,
+                mod.root_src_directory,
+                global_cache_directory,
+                local_cache_directory,
+                dependencies_source,
+                build_roots_source,
+                sub_prefix,
+                error_bundle,
+                all_modules,
+            );
+
+            break :m mod;
+        };
 
         try pkg.add(gpa, name, sub_pkg);
-        try root_pkg.add(gpa, fqn, sub_pkg);
+        if (deps_pkg.table.get(dep.hash.?)) |other_sub| {
+            // This should be the same package (and hence module) since it's the same hash
+            // TODO: dedup multiple versions of the same package
+            assert(other_sub == sub_pkg);
+        } else {
+            try deps_pkg.add(gpa, dep.hash.?, sub_pkg);
+        }
 
         try dependencies_source.writer().print("    pub const {s} = @import(\"{}\");\n", .{
-            std.zig.fmtId(fqn), std.zig.fmtEscapes(fqn),
+            std.zig.fmtId(fqn), std.zig.fmtEscapes(dep.hash.?),
         });
     }
-
-    if (any_error) return error.InvalidBuildManifestFile;
 }
 
 pub fn createFilePkg(
@@ -393,10 +400,10 @@ const Report = struct {
             .src_loc = try eb.addSourceLocation(.{
                 .src_path = try eb.addString(file_path),
                 .span_start = token_starts[msg.tok],
-                .span_end = @intCast(u32, token_starts[msg.tok] + ast.tokenSlice(msg.tok).len),
+                .span_end = @as(u32, @intCast(token_starts[msg.tok] + ast.tokenSlice(msg.tok).len)),
                 .span_main = token_starts[msg.tok] + msg.off,
-                .line = @intCast(u32, start_loc.line),
-                .column = @intCast(u32, start_loc.column),
+                .line = @as(u32, @intCast(start_loc.line)),
+                .column = @as(u32, @intCast(start_loc.column)),
                 .source_line = try eb.addString(ast.source[start_loc.line_start..start_loc.line_end]),
             }),
             .notes_len = notes_len,
@@ -522,7 +529,7 @@ const FetchLocation = union(SourceType) {
 
                 if (req.response.status != .ok) {
                     return report.fail(dep.location_tok, "Expected response status '200 OK' got '{} {s}'", .{
-                        @enumToInt(req.response.status),
+                        @intFromEnum(req.response.status),
                         req.response.status.phrase() orelse "",
                     });
                 }
@@ -799,7 +806,7 @@ fn fetchAndUnpack(
             .msg = "dependency is missing hash field",
         });
         const notes_start = try eb.reserveNotes(notes_len);
-        eb.extra.items[notes_start] = @enumToInt(try eb.addErrorMessage(.{
+        eb.extra.items[notes_start] = @intFromEnum(try eb.addErrorMessage(.{
             .msg = try eb.printString("expected .hash = \"{s}\",", .{&actual_hex}),
         }));
         return error.PackageFetchFailed;
@@ -883,8 +890,8 @@ fn computePackageHash(
 
         while (try walker.next()) |entry| {
             switch (entry.kind) {
-                .Directory => continue,
-                .File => {},
+                .directory => continue,
+                .file => {},
                 else => return error.IllegalFileTypeInPackage,
             }
             const hashed_file = try arena.create(HashedFile);
@@ -902,7 +909,7 @@ fn computePackageHash(
         }
     }
 
-    std.sort.sort(*HashedFile, all_files.items, {}, HashedFile.lessThan);
+    mem.sort(*HashedFile, all_files.items, {}, HashedFile.lessThan);
 
     var hasher = Manifest.Hash.init(.{});
     var any_failures = false;
@@ -946,7 +953,7 @@ fn hashFileFallible(dir: fs.Dir, hashed_file: *HashedFile) HashedFile.Error!void
     defer file.close();
     var hasher = Manifest.Hash.init(.{});
     hasher.update(hashed_file.normalized_path);
-    hasher.update(&.{ 0, @boolToInt(try isExecutable(file)) });
+    hasher.update(&.{ 0, @intFromBool(try isExecutable(file)) });
     while (true) {
         const bytes_read = try file.read(&buf);
         if (bytes_read == 0) break;
@@ -995,4 +1002,38 @@ fn renameTmpIntoCache(
         };
         break;
     }
+}
+
+fn isTarAttachment(content_disposition: []const u8) bool {
+    const disposition_type_end = ascii.indexOfIgnoreCase(content_disposition, "attachment;") orelse return false;
+
+    var value_start = ascii.indexOfIgnoreCasePos(content_disposition, disposition_type_end + 1, "filename") orelse return false;
+    value_start += "filename".len;
+    if (content_disposition[value_start] == '*') {
+        value_start += 1;
+    }
+    if (content_disposition[value_start] != '=') return false;
+    value_start += 1;
+
+    var value_end = mem.indexOfPos(u8, content_disposition, value_start, ";") orelse content_disposition.len;
+    if (content_disposition[value_end - 1] == '\"') {
+        value_end -= 1;
+    }
+    return ascii.endsWithIgnoreCase(content_disposition[value_start..value_end], ".tar.gz");
+}
+
+test "isTarAttachment" {
+    try std.testing.expect(isTarAttachment("attaChment; FILENAME=\"stuff.tar.gz\"; size=42"));
+    try std.testing.expect(isTarAttachment("attachment; filename*=\"stuff.tar.gz\""));
+    try std.testing.expect(isTarAttachment("ATTACHMENT; filename=\"stuff.tar.gz\""));
+    try std.testing.expect(isTarAttachment("attachment; FileName=\"stuff.tar.gz\""));
+    try std.testing.expect(isTarAttachment("attachment; FileName*=UTF-8\'\'xyz%2Fstuff.tar.gz"));
+
+    try std.testing.expect(!isTarAttachment("attachment FileName=\"stuff.tar.gz\""));
+    try std.testing.expect(!isTarAttachment("attachment; FileName=\"stuff.tar\""));
+    try std.testing.expect(!isTarAttachment("attachment; FileName\"stuff.gz\""));
+    try std.testing.expect(!isTarAttachment("attachment; size=42"));
+    try std.testing.expect(!isTarAttachment("inline; size=42"));
+    try std.testing.expect(!isTarAttachment("FileName=\"stuff.tar.gz\"; attachment;"));
+    try std.testing.expect(!isTarAttachment("FileName=\"stuff.tar.gz\";"));
 }

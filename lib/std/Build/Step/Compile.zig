@@ -32,7 +32,7 @@ linker_script: ?FileSource = null,
 version_script: ?[]const u8 = null,
 out_filename: []const u8,
 linkage: ?Linkage = null,
-version: ?std.builtin.Version,
+version: ?std.SemanticVersion,
 kind: Kind,
 major_only_filename: ?[]const u8,
 name_only_filename: ?[]const u8,
@@ -278,7 +278,7 @@ pub const Options = struct {
     optimize: std.builtin.Mode,
     kind: Kind,
     linkage: ?Linkage = null,
-    version: ?std.builtin.Version = null,
+    version: ?std.SemanticVersion = null,
     max_rss: usize = 0,
     filter: ?[]const u8 = null,
     test_runner: ?[]const u8 = null,
@@ -321,7 +321,7 @@ pub const BuildId = union(enum) {
     pub fn initHexString(bytes: []const u8) BuildId {
         var result: BuildId = .{ .hexstring = .{
             .bytes = undefined,
-            .len = @intCast(u8, bytes.len),
+            .len = @as(u8, @intCast(bytes.len)),
         } };
         @memcpy(result.hexstring.bytes[0..bytes.len], bytes);
         return result;
@@ -342,7 +342,7 @@ pub const BuildId = union(enum) {
         } else if (mem.startsWith(u8, text, "0x")) {
             var result: BuildId = .{ .hexstring = undefined };
             const slice = try std.fmt.hexToBytes(&result.hexstring.bytes, text[2..]);
-            result.hexstring.len = @intCast(u8, slice.len);
+            result.hexstring.len = @as(u8, @intCast(slice.len));
             return result;
         }
         return error.InvalidBuildIdStyle;
@@ -564,7 +564,7 @@ pub fn installHeadersDirectory(
     dest_rel_path: []const u8,
 ) void {
     return installHeadersDirectoryOptions(a, .{
-        .source_dir = src_dir_path,
+        .source_dir = .{ .path = src_dir_path },
         .install_dir = .header,
         .install_subdir = dest_rel_path,
     });
@@ -691,7 +691,7 @@ pub fn isStaticLibrary(self: *Compile) bool {
 pub fn producesPdbFile(self: *Compile) bool {
     if (!self.target.isWindows() and !self.target.isUefi()) return false;
     if (self.target.getObjectFormat() == .c) return false;
-    if (self.strip == true) return false;
+    if (self.strip == true or (self.strip == null and self.optimize == .ReleaseSmall)) return false;
     return self.isDynamicLibrary() or self.kind == .exe or self.kind == .@"test";
 }
 
@@ -853,7 +853,7 @@ fn runPkgConfig(self: *Compile, lib_name: []const u8) ![]const []const u8 {
     var zig_args = ArrayList([]const u8).init(b.allocator);
     defer zig_args.deinit();
 
-    var it = mem.tokenize(u8, stdout, " \r\n\t");
+    var it = mem.tokenizeAny(u8, stdout, " \r\n\t");
     while (it.next()) |tok| {
         if (mem.eql(u8, tok, "-I")) {
             const dir = it.next() orelse return error.PkgConfigInvalidOutput;
@@ -1031,11 +1031,6 @@ pub fn addObject(self: *Compile, obj: *Compile) void {
     assert(obj.kind == .obj);
     self.linkLibraryOrObject(obj);
 }
-
-pub const addSystemIncludeDir = @compileError("deprecated; use addSystemIncludePath");
-pub const addIncludeDir = @compileError("deprecated; use addIncludePath");
-pub const addLibPath = @compileError("deprecated, use addLibraryPath");
-pub const addFrameworkDir = @compileError("deprecated, use addFrameworkPath");
 
 pub fn addSystemIncludePath(self: *Compile, path: []const u8) void {
     const b = self.step.owner;
@@ -2064,7 +2059,7 @@ fn findVcpkgRoot(allocator: Allocator) !?[]const u8 {
     const file = fs.cwd().openFile(path_file, .{}) catch return null;
     defer file.close();
 
-    const size = @intCast(usize, try file.getEndPos());
+    const size = @as(usize, @intCast(try file.getEndPos()));
     const vcpkg_path = try allocator.alloc(u8, size);
     const size_read = try file.read(vcpkg_path);
     std.debug.assert(size == size_read);
@@ -2101,10 +2096,10 @@ fn execPkgConfigList(self: *std.Build, out_code: *u8) (PkgConfigError || ExecErr
     const stdout = try self.execAllowFail(&[_][]const u8{ "pkg-config", "--list-all" }, out_code, .Ignore);
     var list = ArrayList(PkgConfigPkg).init(self.allocator);
     errdefer list.deinit();
-    var line_it = mem.tokenize(u8, stdout, "\r\n");
+    var line_it = mem.tokenizeAny(u8, stdout, "\r\n");
     while (line_it.next()) |line| {
         if (mem.trim(u8, line, " \t").len == 0) continue;
-        var tok_it = mem.tokenize(u8, line, " \t");
+        var tok_it = mem.tokenizeAny(u8, line, " \t");
         try list.append(PkgConfigPkg{
             .name = tok_it.next() orelse return error.PkgConfigInvalidOutput,
             .desc = tok_it.rest(),
@@ -2224,7 +2219,7 @@ fn checkCompileErrors(self: *Compile) !void {
     // Render the expected lines into a string that we can compare verbatim.
     var expected_generated = std.ArrayList(u8).init(arena);
 
-    var actual_line_it = mem.split(u8, actual_stderr, "\n");
+    var actual_line_it = mem.splitScalar(u8, actual_stderr, '\n');
     for (self.expect_errors) |expect_line| {
         const actual_line = actual_line_it.next() orelse {
             try expected_generated.appendSlice(expect_line);
