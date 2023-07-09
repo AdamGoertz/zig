@@ -428,7 +428,7 @@ const FetchLocation = union(SourceType) {
                     var uri_str = std.ArrayList(u8).init(gpa);
                     defer uri_str.deinit();
                     try uri.format("+/", .{}, uri_str.writer());
-                    const uri_str_z = try std.cstr.addNullByte(gpa, uri_str.items);
+                    const uri_str_z = try gpa.dupeZ(u8, uri_str.items);
                     defer gpa.free(uri_str_z);
 
                     var buf: [std.os.windows.MAX_PATH:0]u8 = undefined;
