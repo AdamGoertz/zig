@@ -98,6 +98,178 @@ fn handleCmp(pc: usize, arg1: u64, arg2: u64) void {
     //std.log.debug("0x{x}: comparison of {d} and {d}", .{ pc, arg1, arg2 });
 }
 
+pub fn Bandit(comptime N: usize) type {
+    return struct {
+        rewards: [N]u32 = [_]u32{0} ** N,
+        counts: [N]u32 = [_]u32{0} ** N,
+        squared_rewards: [N]u32 = [_]u32{0} ** N,
+        scores: [N]f32 = [_]f32{1000.0} ** N, // Give un-tested mutations a large score to encourage them to be used.
+        total: u32 = 0,
+
+        const Self = @This();
+
+        pub fn bestArm(b: Self) usize {
+            var best_arm: usize = 0;
+            var best_score: f32 = 0.0;
+            for (&b.scores, 0..) |score, i| {
+                if (score > best_score) {
+                    best_score = score;
+                    best_arm = i;
+                }
+            }
+            return best_arm;
+        }
+
+        pub fn update(b: *Self, arm: usize, reward: u1) void {
+            b.rewards[arm] += reward;
+            b.counts[arm] += 1;
+            b.squared_rewards[arm] += reward * reward;
+            b.total += 1;
+
+            const total_reward: f32 = @floatFromInt(b.rewards[arm]);
+            const count: f32 = @floatFromInt(b.counts[arm]);
+            const squared: f32 = @floatFromInt(b.squared_rewards[arm]);
+
+            const avg: f32 = total_reward / count;
+            const freq = @log(@as(f32, @floatFromInt(b.total))) / count;
+            const variance = squared / count - avg;
+            b.scores[arm] = avg + @sqrt(freq * @min(0.25, variance + @sqrt(2 * freq)));
+        }
+    };
+}
+
+/// Adaptive Multi-armed bandit Havoc fuzzer strategy.
+/// For more detail see Wu et al. 'One Fuzzing Stragety to Rule Them All` (2022)
+/// https://i.cs.hku.hk/~heming/papers/icse22-fuzzing.pdf
+const HavocMAB = struct {
+    /// Index `i` holds statistics for the 2^i stack size.
+    size_bandit: Bandit(size_buckets) = .{},
+    /// Statistics for each `MutatorType`.
+    /// TODO: This should be an array of bandits for each stack size
+    type_bandit: Bandit(@typeInfo(MutationType).Enum.fields.len) = .{},
+    /// The most recently-produced set of mutations
+    last_mutations: ?Mutations = null,
+
+    const max_stack_size = 128;
+    const size_buckets = std.math.log2_int(usize, max_stack_size) + 1;
+
+    const MutationType = enum {
+        unit,
+        chunk,
+    };
+
+    const UnitMutation = enum {
+        bitflip,
+        interesting_value,
+        arithmetic_increase,
+        arithmetic_decrease,
+        random_value,
+    };
+
+    const ChunkMutation = enum {
+        delete_bytes,
+        clone_bytes,
+        insert_bytes,
+        overwrite_bytes,
+    };
+
+    pub const Mutations = struct {
+        count_log2: usize,
+        type: MutationType,
+    };
+
+    /// Compute the current best set of mutations and apply them to the input `bytes`.
+    /// Returns the set of mutations selected.
+    pub fn mutate(h: *HavocMAB, gpa: Allocator, rng: std.Random, input: *std.ArrayListUnmanaged(u8)) Allocator.Error!void {
+        const stack_size_log2: u6 = @intCast(h.size_bandit.bestArm());
+        const stack_size: usize = @as(usize, 1) << stack_size_log2;
+        const best_type: MutationType = @enumFromInt(h.type_bandit.bestArm());
+
+        switch (best_type) {
+            .unit => applyUnitMutations(rng, input, stack_size),
+            .chunk => try applyChunkMutations(gpa, rng, input, stack_size),
+        }
+
+        h.last_mutations = .{
+            .count_log2 = stack_size_log2,
+            .type = best_type,
+        };
+    }
+
+    fn applyUnitMutations(rng: std.Random, input: *std.ArrayListUnmanaged(u8), num_mutations: usize) void {
+        // TODO: Support 16 and 32-bit mutations as well
+        for (0..num_mutations) |_| {
+            const rand = rng.uintLessThanBiased(usize, input.items.len * @typeInfo(UnitMutation).Enum.fields.len);
+            const mutation: UnitMutation = @enumFromInt(rand / input.items.len);
+            const index = rand % input.items.len;
+
+            switch (mutation) {
+                .bitflip => {
+                    const bit_index = rng.int(u3);
+                    input.items[index] ^= (@as(u8, 1) << bit_index);
+                },
+                .interesting_value => {
+                    const values = [_]u8{ 0, 1, std.math.maxInt(u8) - 1, std.math.maxInt(u8) }; // TODO: Determine best interesting values
+                    const val_index = rng.uintLessThanBiased(usize, values.len);
+                    input.items[index] = values[val_index];
+                },
+                .arithmetic_increase => {
+                    input.items[index] +%= rng.int(u8);
+                },
+                .arithmetic_decrease => {
+                    input.items[index] -%= rng.int(u8);
+                },
+                .random_value => {
+                    input.items[index] = rng.int(u8);
+                },
+            }
+        }
+    }
+
+    fn applyChunkMutations(gpa: Allocator, rng: std.Random, input: *std.ArrayListUnmanaged(u8), num_mutations: usize) Allocator.Error!void {
+        for (0..num_mutations) |_| {
+            const mutation, const index, const len = if (input.items.len > 0) m: {
+                const rand = rng.uintLessThanBiased(usize, input.items.len * @typeInfo(ChunkMutation).Enum.fields.len);
+                const mutation: ChunkMutation = @enumFromInt(rand / input.items.len);
+                const index = rand % input.items.len;
+                const len = @min(rng.int(u10), input.items.len - index);
+                break :m .{ mutation, index, len };
+            } else .{ .insert_bytes, 0, rng.int(u10) };
+
+            switch (mutation) {
+                .delete_bytes => {
+                    std.mem.copyForwards(u8, input.items[index..], input.items[index + len ..]);
+                    input.shrinkRetainingCapacity(input.items.len - len);
+                },
+                .clone_bytes => {
+                    if (len == input.items.len) return;
+
+                    const duped_start = rng.uintLessThanBiased(usize, input.items.len - len);
+                    if (duped_start > index) {
+                        std.mem.copyForwards(u8, input.items[index .. index + len], input.items[duped_start .. duped_start + len]);
+                    } else {
+                        std.mem.copyBackwards(u8, input.items[index .. index + len], input.items[duped_start .. duped_start + len]);
+                    }
+                },
+                .insert_bytes => {
+                    const new = try input.addManyAt(gpa, index, len);
+                    rng.bytes(new);
+                },
+                .overwrite_bytes => {
+                    rng.bytes(input.items[index .. index + len]);
+                },
+            }
+        }
+    }
+
+    /// Update the statistics for the selected set of mutations and their
+    /// resulting reward.
+    pub fn update(h: *HavocMAB, reward: u1) void {
+        h.size_bandit.update(@intCast(h.last_mutations.?.count_log2), reward);
+        h.type_bandit.update(@intFromEnum(h.last_mutations.?.type), reward);
+    }
+};
+
 const Fuzzer = struct {
     gpa: Allocator,
     rng: std.Random.DefaultPrng,
@@ -107,6 +279,8 @@ const Fuzzer = struct {
     recent_cases: RunMap,
     deduplicated_runs: usize,
     coverage: Coverage,
+    havoc: HavocMAB,
+    last_case: ?*Run = null,
 
     const RunMap = std.ArrayHashMapUnmanaged(Run, void, Run.HashContext, false);
 
@@ -172,9 +346,13 @@ const Fuzzer = struct {
     };
 
     fn analyzeLastRun(f: *Fuzzer) Analysis {
+        const score = f.coverage.pc_table.count();
+        const id = f.coverage.run_id_hasher.final();
+        const reward = @intFromBool(score > f.last_case.?.score);
+        f.havoc.update(reward);
         return .{
-            .id = f.coverage.run_id_hasher.final(),
-            .score = f.coverage.pc_table.count(),
+            .id = id,
+            .score = score,
         };
     }
 
@@ -239,9 +417,9 @@ const Fuzzer = struct {
         }
 
         const chosen_index = rng.uintLessThanBiased(usize, f.recent_cases.entries.len);
-        const run = &f.recent_cases.keys()[chosen_index];
+        f.last_case = &f.recent_cases.keys()[chosen_index];
         f.input.clearRetainingCapacity();
-        f.input.appendSliceAssumeCapacity(run.input);
+        f.input.appendSliceAssumeCapacity(f.last_case.?.input);
         try f.mutate();
 
         f.coverage.reset();
@@ -265,11 +443,15 @@ const Fuzzer = struct {
                 i, run.id, run.score, std.zig.fmtEscapes(run.input),
             });
         }
+        std.log.info(
+            "HavocMAB type stats={any} size_stats={any}",
+            .{ &f.havoc.type_bandit.scores, &f.havoc.size_bandit.scores },
+        );
     }
 
     fn mutate(f: *Fuzzer) !void {
         const gpa = f.gpa;
-        const rng = fuzzer.rng.random();
+        const rng = f.rng.random();
 
         if (f.input.items.len == 0) {
             const len = rng.uintLessThanBiased(usize, 80);
@@ -278,16 +460,7 @@ const Fuzzer = struct {
             return;
         }
 
-        const index = rng.uintLessThanBiased(usize, f.input.items.len * 3);
-        if (index < f.input.items.len) {
-            f.input.items[index] = rng.int(u8);
-        } else if (index < f.input.items.len * 2) {
-            _ = f.input.orderedRemove(index - f.input.items.len);
-        } else if (index < f.input.items.len * 3) {
-            try f.input.insert(gpa, index - f.input.items.len * 2, rng.int(u8));
-        } else {
-            unreachable;
-        }
+        try f.havoc.mutate(gpa, rng, &f.input);
     }
 };
 
@@ -308,6 +481,7 @@ var fuzzer: Fuzzer = .{
     .deduplicated_runs = 0,
     .recent_cases = .{},
     .coverage = undefined,
+    .havoc = .{},
 };
 
 export fn fuzzer_next() Fuzzer.Slice {
