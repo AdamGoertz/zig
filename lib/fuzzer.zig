@@ -126,14 +126,18 @@ pub fn Bandit(comptime N: usize) type {
             b.squared_rewards[arm] += reward * reward;
             b.total += 1;
 
-            const total_reward: f32 = @floatFromInt(b.rewards[arm]);
-            const count: f32 = @floatFromInt(b.counts[arm]);
-            const squared: f32 = @floatFromInt(b.squared_rewards[arm]);
+            for (&b.rewards, &b.counts, &b.squared_rewards, &b.scores) |r, c, sq, *score| {
+                if (c == 0) continue;
 
-            const avg: f32 = total_reward / count;
-            const freq = @log(@as(f32, @floatFromInt(b.total))) / count;
-            const variance = squared / count - avg;
-            b.scores[arm] = avg + @sqrt(freq * @min(0.25, variance + @sqrt(2 * freq)));
+                const total_reward: f32 = @floatFromInt(r);
+                const count: f32 = @floatFromInt(c);
+                const squared: f32 = @floatFromInt(sq);
+
+                const avg: f32 = total_reward / count;
+                const freq = @log(@as(f32, @floatFromInt(b.total))) / count;
+                const variance = squared / count - avg;
+                score.* = avg + @sqrt(freq * @min(0.25, variance + @sqrt(2 * freq)));
+            }
         }
     };
 }
@@ -142,10 +146,9 @@ pub fn Bandit(comptime N: usize) type {
 /// For more detail see Wu et al. 'One Fuzzing Stragety to Rule Them All` (2022)
 /// https://i.cs.hku.hk/~heming/papers/icse22-fuzzing.pdf
 const HavocMAB = struct {
-    /// Index `i` holds statistics for the 2^i stack size.
+    /// Multi-armed bandit for the stack size
     size_bandit: SizeBandit = .{},
-    /// Statistics for each `MutatorType`.
-    /// TODO: This should be an array of bandits for each stack size
+    /// Multi-armed bandits for unit or chunk mutations; one for each size bucket
     type_bandit: [size_buckets]TypeBandit = [_]TypeBandit{.{}} ** size_buckets,
     /// The most recently-produced set of mutations
     last_mutations: ?Mutations = null,
