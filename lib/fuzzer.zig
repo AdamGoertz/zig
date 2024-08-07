@@ -143,15 +143,18 @@ pub fn Bandit(comptime N: usize) type {
 /// https://i.cs.hku.hk/~heming/papers/icse22-fuzzing.pdf
 const HavocMAB = struct {
     /// Index `i` holds statistics for the 2^i stack size.
-    size_bandit: Bandit(size_buckets) = .{},
+    size_bandit: SizeBandit = .{},
     /// Statistics for each `MutatorType`.
     /// TODO: This should be an array of bandits for each stack size
-    type_bandit: Bandit(@typeInfo(MutationType).Enum.fields.len) = .{},
+    type_bandit: [size_buckets]TypeBandit = [_]TypeBandit{.{}} ** size_buckets,
     /// The most recently-produced set of mutations
     last_mutations: ?Mutations = null,
 
     const max_stack_size = 128;
     const size_buckets = std.math.log2_int(usize, max_stack_size) + 1;
+
+    const SizeBandit = Bandit(size_buckets);
+    const TypeBandit = Bandit(@typeInfo(MutationType).Enum.fields.len);
 
     const MutationType = enum {
         unit,
@@ -160,9 +163,15 @@ const HavocMAB = struct {
 
     const UnitMutation = enum {
         bitflip,
-        interesting_value,
-        arithmetic_increase,
-        arithmetic_decrease,
+        interesting_value_8,
+        interesting_value_16,
+        interesting_value_32,
+        arithmetic_increase_8,
+        arithmetic_decrease_8,
+        arithmetic_increase_16,
+        arithmetic_decrease_16,
+        arithmetic_increase_32,
+        arithmetic_decrease_32,
         random_value,
     };
 
@@ -183,7 +192,7 @@ const HavocMAB = struct {
     pub fn mutate(h: *HavocMAB, gpa: Allocator, rng: std.Random, input: *std.ArrayListUnmanaged(u8)) Allocator.Error!void {
         const stack_size_log2: u6 = @intCast(h.size_bandit.bestArm());
         const stack_size: usize = @as(usize, 1) << stack_size_log2;
-        const best_type: MutationType = @enumFromInt(h.type_bandit.bestArm());
+        const best_type: MutationType = @enumFromInt(h.type_bandit[stack_size_log2].bestArm());
 
         switch (best_type) {
             .unit => applyUnitMutations(rng, input, stack_size),
@@ -197,30 +206,74 @@ const HavocMAB = struct {
     }
 
     fn applyUnitMutations(rng: std.Random, input: *std.ArrayListUnmanaged(u8), num_mutations: usize) void {
-        // TODO: Support 16 and 32-bit mutations as well
         for (0..num_mutations) |_| {
             const rand = rng.uintLessThanBiased(usize, input.items.len * @typeInfo(UnitMutation).Enum.fields.len);
             const mutation: UnitMutation = @enumFromInt(rand / input.items.len);
             const index = rand % input.items.len;
+
+            const endian = rng.enumValue(std.builtin.Endian);
+            const values_8 = [_]i8{ std.math.minInt(i8), -1, 0, 1, 16, 32, 64, 100, std.math.maxInt(i8) };
+            const values_16 = [_]i16{ std.math.minInt(i16), -129, -1, 0, 1, 128, 255, 256, 512, 1000, 1024, 4096, std.math.maxInt(i16) };
+            const values_32 = [_]i32{ std.math.minInt(i32), -100663046, -32769, -1, 0, 1, 32768, 65535, 65536, 100663045, std.math.maxInt(i32) };
 
             switch (mutation) {
                 .bitflip => {
                     const bit_index = rng.int(u3);
                     input.items[index] ^= (@as(u8, 1) << bit_index);
                 },
-                .interesting_value => {
-                    const values = [_]u8{ 0, 1, std.math.maxInt(u8) - 1, std.math.maxInt(u8) }; // TODO: Determine best interesting values
-                    const val_index = rng.uintLessThanBiased(usize, values.len);
-                    input.items[index] = values[val_index];
+                .interesting_value_8 => {
+                    const val_index = rng.uintLessThanBiased(usize, values_8.len);
+                    input.items[index] = @bitCast(values_8[val_index]);
                 },
-                .arithmetic_increase => {
+                .interesting_value_16 => {
+                    const T = i16;
+                    if (input.items.len - index < @sizeOf(T)) continue;
+                    const val_index = rng.uintLessThanBiased(usize, values_16.len);
+                    std.mem.writeInt(T, input.items[index..][0..@sizeOf(T)], values_16[val_index], endian);
+                },
+                .interesting_value_32 => {
+                    const T = i32;
+                    if (input.items.len - index < @sizeOf(T)) continue;
+                    const val_index = rng.uintLessThanBiased(usize, values_32.len);
+                    std.mem.writeInt(T, input.items[index..][0..@sizeOf(T)], values_32[val_index], endian);
+                },
+                .arithmetic_increase_8 => {
                     input.items[index] +%= rng.int(u8);
                 },
-                .arithmetic_decrease => {
+                .arithmetic_decrease_8 => {
                     input.items[index] -%= rng.int(u8);
                 },
+                .arithmetic_increase_16 => {
+                    const T = u16;
+                    if (input.items.len - index < @sizeOf(T)) continue;
+                    const int_bytes = input.items[index..][0..@sizeOf(T)];
+                    const val = std.mem.readInt(T, int_bytes, endian);
+                    std.mem.writeInt(T, int_bytes, val +% rng.int(T), endian);
+                },
+                .arithmetic_decrease_16 => {
+                    const T = u16;
+                    if (input.items.len - index < @sizeOf(T)) continue;
+                    const int_bytes = input.items[index..][0..@sizeOf(T)];
+                    const val = std.mem.readInt(T, int_bytes, endian);
+                    std.mem.writeInt(T, int_bytes, val -% rng.int(T), endian);
+                },
+                .arithmetic_increase_32 => {
+                    const T = u32;
+                    if (input.items.len - index < @sizeOf(T)) continue;
+                    const int_bytes = input.items[index..][0..@sizeOf(T)];
+                    const val = std.mem.readInt(T, int_bytes, endian);
+                    std.mem.writeInt(T, int_bytes, val +% rng.int(T), endian);
+                },
+                .arithmetic_decrease_32 => {
+                    const T = u32;
+                    if (input.items.len - index < @sizeOf(T)) continue;
+                    const int_bytes = input.items[index..][0..@sizeOf(T)];
+                    const val = std.mem.readInt(T, int_bytes, endian);
+                    std.mem.writeInt(T, int_bytes, val -% rng.int(T), endian);
+                },
                 .random_value => {
-                    input.items[index] = rng.int(u8);
+                    // Prevent no-op by XOR-ing with 1-255
+                    input.items[index] ^= 1 + rng.uintLessThanBiased(u8, 255);
                 },
             }
         }
@@ -265,8 +318,9 @@ const HavocMAB = struct {
     /// Update the statistics for the selected set of mutations and their
     /// resulting reward.
     pub fn update(h: *HavocMAB, reward: u1) void {
-        h.size_bandit.update(@intCast(h.last_mutations.?.count_log2), reward);
-        h.type_bandit.update(@intFromEnum(h.last_mutations.?.type), reward);
+        const mutations = h.last_mutations.?;
+        h.size_bandit.update(mutations.count_log2, reward);
+        h.type_bandit[h.last_mutations.?.count_log2].update(@intFromEnum(mutations.type), reward);
     }
 };
 
@@ -444,9 +498,15 @@ const Fuzzer = struct {
             });
         }
         std.log.info(
-            "HavocMAB type stats={any} size_stats={any}",
-            .{ &f.havoc.type_bandit.scores, &f.havoc.size_bandit.scores },
+            "HavocMAB size_stats={any}",
+            .{&f.havoc.size_bandit.scores},
         );
+        for (&f.havoc.type_bandit, 0..) |bandit, i| {
+            std.log.info(
+                "type_stats[2^{}]={any}",
+                .{ i, &bandit.scores },
+            );
+        }
     }
 
     fn mutate(f: *Fuzzer) !void {
